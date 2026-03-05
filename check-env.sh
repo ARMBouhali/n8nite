@@ -30,18 +30,44 @@ ENV_FILE="$REPO_ROOT/.env"
 CHECK_COMPOSE=1
 QUIET=0
 
+supports_color() {
+	if [[ -n "${FORCE_COLOR:-}" && "${FORCE_COLOR}" != "0" ]]; then
+		return 0
+	fi
+	if [[ -n "${CLICOLOR_FORCE:-}" && "${CLICOLOR_FORCE}" != "0" ]]; then
+		return 0
+	fi
+	[[ "${TERM:-}" == "dumb" ]] && return 1
+	[[ -t 1 || -t 2 ]]
+}
+
 log() {
+	local reset="" info=""
+	if supports_color; then
+		reset=$'\033[0m'
+		info=$'\033[38;5;118m'
+	fi
 	if [[ "$QUIET" -eq 0 ]]; then
-		printf '[INFO] %s\n' "$*"
+		printf '%b[INFO]%b %s\n' "$info" "$reset" "$*"
 	fi
 }
 
 warn() {
-	printf '[WARN] %s\n' "$*" >&2
+	local reset="" warn_color=""
+	if supports_color; then
+		reset=$'\033[0m'
+		warn_color=$'\033[38;5;220m'
+	fi
+	printf '%b[WARN]%b %s\n' "$warn_color" "$reset" "$*" >&2
 }
 
 fail() {
-	printf '[ERROR] %s\n' "$*" >&2
+	local reset="" err=""
+	if supports_color; then
+		reset=$'\033[0m'
+		err=$'\033[38;5;203m'
+	fi
+	printf '%b[ERROR]%b %s\n' "$err" "$reset" "$*" >&2
 	exit 1
 }
 

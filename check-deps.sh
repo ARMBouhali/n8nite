@@ -36,35 +36,75 @@ PASSED=0
 FAILED=0
 WARNED=0
 
+supports_color() {
+	if [[ -n "${FORCE_COLOR:-}" && "${FORCE_COLOR}" != "0" ]]; then
+		return 0
+	fi
+	if [[ -n "${CLICOLOR_FORCE:-}" && "${CLICOLOR_FORCE}" != "0" ]]; then
+		return 0
+	fi
+	[[ "${TERM:-}" == "dumb" ]] && return 1
+	[[ -t 1 || -t 2 ]]
+}
+
 log() {
+	local reset="" info=""
+	if supports_color; then
+		reset=$'\033[0m'
+		info=$'\033[38;5;118m'
+	fi
 	if [[ "$QUIET" -eq 0 ]]; then
-		printf '[INFO] %s\n' "$*"
+		printf '%b[INFO]%b %s\n' "$info" "$reset" "$*"
 	fi
 }
 
 pass() {
 	local msg="$1"
+	local reset="" ok=""
+	if supports_color; then
+		reset=$'\033[0m'
+		ok=$'\033[38;5;78m'
+	fi
 	TOTAL=$((TOTAL + 1))
 	PASSED=$((PASSED + 1))
-	printf '[PASS] %s\n' "$msg"
+	printf '%b[PASS]%b %s\n' "$ok" "$reset" "$msg"
 }
 
 warn() {
 	local msg="$1"
+	local reset="" warn_color=""
+	if supports_color; then
+		reset=$'\033[0m'
+		warn_color=$'\033[38;5;220m'
+	fi
 	TOTAL=$((TOTAL + 1))
 	WARNED=$((WARNED + 1))
-	printf '[WARN] %s\n' "$msg" >&2
+	printf '%b[WARN]%b %s\n' "$warn_color" "$reset" "$msg" >&2
 }
 
 fail() {
 	local msg="$1"
 	local fix="${2:-}"
+	local reset="" fail_color=""
+	if supports_color; then
+		reset=$'\033[0m'
+		fail_color=$'\033[38;5;203m'
+	fi
 	TOTAL=$((TOTAL + 1))
 	FAILED=$((FAILED + 1))
-	printf '[FAIL] %s\n' "$msg" >&2
+	printf '%b[FAIL]%b %s\n' "$fail_color" "$reset" "$msg" >&2
 	if [[ -n "$fix" ]]; then
 		printf '       fix: %s\n' "$fix" >&2
 	fi
+}
+
+log_error() {
+	local reset="" err=""
+	if supports_color; then
+		reset=$'\033[0m'
+		err=$'\033[38;5;203m'
+	fi
+	printf '%b[ERROR]%b %s\n' "$err" "$reset" "$*" >&2
 }
 
 cmd_exists() {
@@ -210,7 +250,7 @@ while (($# > 0)); do
 			exit 0
 			;;
 		*)
-			printf '[ERROR] Unknown argument: %s\n' "$1" >&2
+			log_error "Unknown argument: $1"
 			usage >&2
 			exit 1
 			;;
@@ -228,7 +268,7 @@ case "$PROFILE" in
 		RESOLVED_PROFILE="$PROFILE"
 		;;
 	*)
-		printf '[ERROR] Unknown profile: %s\n' "$PROFILE" >&2
+		log_error "Unknown profile: $PROFILE"
 		usage >&2
 		exit 1
 		;;
@@ -247,7 +287,7 @@ case "$RESOLVED_PROFILE" in
 		check_nginx_https
 		;;
 	*)
-		printf '[ERROR] Internal profile resolution error: %s\n' "$RESOLVED_PROFILE" >&2
+		log_error "Internal profile resolution error: $RESOLVED_PROFILE"
 		exit 1
 		;;
 esac

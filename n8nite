@@ -17,6 +17,8 @@ Commands:
   deps check [args...]                Check host dependencies (wraps check-deps.sh)
   env check [args...]                 Validate env file (wraps check-env.sh)
   env init [local|prod] [--force]     Create env file from template
+  env view [args...]                  View env file (less/cat)
+  env edit [args...]                  Edit env file (nano preferred, vi fallback)
   env keygen [--write] [--force]      Generate secure N8N_ENCRYPTION_KEY
   uninstall [args...]                 Remove installed n8nite command symlink
 
@@ -42,6 +44,8 @@ Examples:
   ./n8nite deps check --profile nginx-https
   ./n8nite env init local --force
   ./n8nite env check
+  ./n8nite env view
+  ./n8nite env edit
   ./n8nite -e ./.env env check -n
   ./n8nite env keygen --write --force
   ./n8nite up
@@ -84,7 +88,14 @@ ENV_TEMPLATE_LOCAL="$REPO_ROOT/.env.local.example"
 N8NITE_VERSION="${N8NITE_VERSION:-0.1.0}"
 
 supports_color() {
-	[[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]]
+	if [[ -n "${FORCE_COLOR:-}" && "${FORCE_COLOR}" != "0" ]]; then
+		return 0
+	fi
+	if [[ -n "${CLICOLOR_FORCE:-}" && "${CLICOLOR_FORCE}" != "0" ]]; then
+		return 0
+	fi
+	[[ "${TERM:-}" == "dumb" ]] && return 1
+	[[ -t 1 || -t 2 ]]
 }
 
 print_banner() {
@@ -113,11 +124,34 @@ print_version() {
 }
 
 log() {
-	printf '[INFO] %s\n' "$*"
+	local reset="" info=""
+	if supports_color; then
+		reset=$'\033[0m'
+		info=$'\033[38;5;118m'
+	fi
+	printf '%b[INFO]%b %s\n' "$info" "$reset" "$*"
+}
+
+log_warn() {
+	local reset="" warn=""
+	if supports_color; then
+		reset=$'\033[0m'
+		warn=$'\033[38;5;220m'
+	fi
+	printf '%b[WARN]%b %s\n' "$warn" "$reset" "$*"
+}
+
+log_error() {
+	local reset="" err=""
+	if supports_color; then
+		reset=$'\033[0m'
+		err=$'\033[38;5;203m'
+	fi
+	printf '%b[ERROR]%b %s\n' "$err" "$reset" "$*" >&2
 }
 
 fail() {
-	printf '[ERROR] %s\n' "$*" >&2
+	log_error "$*"
 	exit 1
 }
 
@@ -286,6 +320,90 @@ EOF
 	fi
 }
 
+cmd_env_view() {
+	while (($# > 0)); do
+		case "$1" in
+			-h|--help)
+				cat <<'EOF'
+Usage:
+  ./n8nite [-e PATH|--env-file PATH] env view
+
+View env file content.
+Viewer preference:
+  1) nano -v
+  2) less
+  3) cat
+EOF
+				return 0
+				;;
+			*)
+				fail "Unknown env view argument: $1"
+				;;
+		esac
+	done
+
+	[[ -f "$ENV_FILE" ]] || fail "Env file not found: $ENV_FILE"
+
+	if command -v nano >/dev/null 2>&1; then
+		if nano -v "$ENV_FILE"; then
+			return 0
+		fi
+		log_warn "nano -v exited with error; trying less."
+	fi
+
+	if command -v less >/dev/null 2>&1; then
+		LESS="${LESS:--FRX}" less "$ENV_FILE"
+	else
+		log_warn "'less' not found; printing with cat."
+		cat "$ENV_FILE"
+	fi
+}
+
+cmd_env_edit() {
+	while (($# > 0)); do
+		case "$1" in
+			-h|--help)
+				cat <<'EOF'
+Usage:
+  ./n8nite [-e PATH|--env-file PATH] env edit
+
+Open env file in an editor.
+Editor preference:
+  1) nano
+  2) vi (with syntax commands)
+EOF
+				return 0
+				;;
+			*)
+				fail "Unknown env edit argument: $1"
+				;;
+		esac
+	done
+
+	if [[ ! -e "$ENV_FILE" ]]; then
+		log_warn "Env file not found, creating: $ENV_FILE"
+		touch "$ENV_FILE"
+	fi
+
+	if command -v nano >/dev/null 2>&1; then
+		if nano "$ENV_FILE"; then
+			return 0
+		fi
+		log_warn "nano exited with error; falling back to vi."
+	fi
+
+	if command -v vi >/dev/null 2>&1; then
+		# Try enabling shell syntax highlighting in vi/vim; fallback to plain vi on unsupported flags.
+		if vi -c 'syntax on' -c 'set filetype=sh' "$ENV_FILE"; then
+			return 0
+		fi
+		vi "$ENV_FILE"
+		return $?
+	fi
+
+	fail "No supported editor found (install nano or vi)"
+}
+
 cmd_env() {
 	local subcommand="${1:-check}"
 	if [[ $# -gt 0 ]]; then
@@ -298,6 +416,12 @@ cmd_env() {
 			;;
 		init)
 			cmd_env_init "$@"
+			;;
+		view)
+			cmd_env_view "$@"
+			;;
+		edit)
+			cmd_env_edit "$@"
 			;;
 		keygen)
 			cmd_env_keygen "$@"
@@ -429,13 +553,21 @@ confirm_yes_no() {
 run_step() {
 	local label="$1"
 	shift
-	printf '\n[RUN] %s\n' "$label"
+	local reset="" run="" ok="" fail_color=""
+	if supports_color; then
+		reset=$'\033[0m'
+		run=$'\033[38;5;118m'
+		ok=$'\033[38;5;78m'
+		fail_color=$'\033[38;5;203m'
+	fi
+
+	printf '\n%b[RUN]%b %s\n' "$run" "$reset" "$label"
 	if "$@"; then
-		printf '[OK] %s\n' "$label"
+		printf '%b[OK]%b %s\n' "$ok" "$reset" "$label"
 		return 0
 	fi
 	local rc=$?
-	printf '[FAIL] %s (exit %d)\n' "$label" "$rc" >&2
+	printf '%b[FAIL]%b %s (exit %d)\n' "$fail_color" "$reset" "$label" "$rc" >&2
 	return "$rc"
 }
 
@@ -500,8 +632,14 @@ interactive_env_init() {
 	local target force_flag=()
 
 	target="$(prompt_default "Target env file path" "$ENV_FILE")"
-	if confirm_yes_no "Overwrite target if it already exists?"; then
-		force_flag=(--force)
+	if [[ -e "$target" ]]; then
+		if confirm_yes_no "Overwrite target file?"; then
+			force_flag=(--force)
+		else
+			log "Keeping existing file, skipping env init."
+			ENV_FILE="$target"
+			return 0
+		fi
 	fi
 
 	run_step "env init (${profile})" cmd_env_init "$profile" --target "$target" "${force_flag[@]}" || true
@@ -529,9 +667,55 @@ interactive_logs() {
 	[[ -n "$service" ]] && cmd+=("$service")
 
 	if [[ "$follow" == "y" ]]; then
-		printf '\n[INFO] Press Ctrl+C to stop log streaming and return to menu.\n'
+		printf '\n'
+		log "Press Ctrl+C to stop log streaming and return to menu."
 	fi
 	run_step "docker compose logs" run_compose "${cmd[@]}" || true
+}
+
+interactive_view_env_file() {
+	cmd_env_view
+}
+
+interactive_edit_env_file() {
+	cmd_env_edit
+}
+
+print_interactive_menu() {
+	local reset="" title="" section=""
+	if supports_color; then
+		reset=$'\033[0m'
+		title=$'\033[38;5;118m'
+		section=$'\033[38;5;118m'
+	fi
+
+	printf '\n%b=== n8nite Interactive Menu ===%b\n' "$title" "$reset"
+	printf '%bEnv file:%b %s\n' "$section" "$reset" "$ENV_FILE"
+	printf '%b----------------------------------------%b\n' "$section" "$reset"
+	printf '%bEnvironment%b\n' "$section" "$reset"
+	printf '  1) Env check\n'
+	printf '  2) Env init (local)\n'
+	printf '  3) Env init (prod)\n'
+	printf '  4) Edit env file (.env)\n'
+	printf '  5) View env file (.env)\n'
+	printf '%bStack%b\n' "$section" "$reset"
+	printf '  6) Stack up\n'
+	printf '  7) Stack down\n'
+	printf '  8) Stack restart\n'
+	printf '  9) Stack status (ps)\n'
+	printf '  10) Stack logs\n'
+	printf '%bNginx%b\n' "$section" "$reset"
+	printf '  11) Nginx generate\n'
+	printf '  12) Nginx deploy\n'
+	printf '%bDiagnostics%b\n' "$section" "$reset"
+	printf '  13) Deps check\n'
+	printf '  14) Test suite (functional)\n'
+	printf '  15) Test suite (requirements)\n'
+	printf '  16) Doctor\n'
+	printf '%bUtility%b\n' "$section" "$reset"
+	printf '  17) Change env file\n'
+	printf '  18) Generate N8N key\n'
+	printf '  0) Exit\n'
 }
 
 interactive_menu() {
@@ -541,30 +725,8 @@ interactive_menu() {
 	print_banner
 
 	while true; do
-		cat <<EOF
-
-=== n8nite Interactive Menu ===
-Env file: $ENV_FILE
-
-1) Env check
-2) Env init (local)
-3) Env init (prod)
-4) Stack up
-5) Stack down
-6) Stack restart
-7) Stack status (ps)
-8) Stack logs
-9) Nginx generate
-10) Nginx deploy
-11) Deps check
-12) Test suite (functional)
-13) Test suite (requirements)
-14) Doctor
-15) Change env file
-16) Generate N8N key
-0) Exit
-EOF
-		read -r -p "Choose an action [0-16]: " choice
+		print_interactive_menu
+		read -r -p "Choose an action [0-18]: " choice
 
 		case "$choice" in
 			1)
@@ -577,52 +739,58 @@ EOF
 				interactive_env_init "prod"
 				;;
 			4)
-				run_step "stack up" run_env_check && run_step "docker compose up -d" run_compose up -d || true
+				interactive_edit_env_file
 				;;
 			5)
-				run_step "docker compose down" run_compose down || true
+				interactive_view_env_file
 				;;
 			6)
-				run_step "docker compose restart" run_compose restart || true
+				run_step "stack up" run_env_check && run_step "docker compose up -d" run_compose up -d || true
 				;;
 			7)
-				run_step "docker compose ps" run_compose ps || true
+				run_step "docker compose down" run_compose down || true
 				;;
 			8)
-				interactive_logs
+				run_step "docker compose restart" run_compose restart || true
 				;;
 			9)
-				interactive_nginx_generate
+				run_step "docker compose ps" run_compose ps || true
 				;;
 			10)
-				interactive_nginx_deploy
+				interactive_logs
 				;;
 			11)
-				run_step "deps check" run_deps_check || true
+				interactive_nginx_generate
 				;;
 			12)
-				run_step "test suite (functional)" "$TEST_SUITE_SCRIPT" -f || true
+				interactive_nginx_deploy
 				;;
 			13)
-				run_step "test suite (requirements)" "$TEST_SUITE_SCRIPT" -r || true
+				run_step "deps check" run_deps_check || true
 				;;
 			14)
-				run_step "doctor" run_env_check && run_step "docker compose ps" run_compose ps || true
+				run_step "test suite (functional)" "$TEST_SUITE_SCRIPT" -f || true
 				;;
 			15)
-				new_env="$(prompt_default "New env file path" "$ENV_FILE")"
-				ENV_FILE="$new_env"
-				printf '[INFO] Env file updated to: %s\n' "$ENV_FILE"
+				run_step "test suite (requirements)" "$TEST_SUITE_SCRIPT" -r || true
 				;;
 			16)
+				run_step "doctor" run_env_check && run_step "docker compose ps" run_compose ps || true
+				;;
+			17)
+				new_env="$(prompt_default "New env file path" "$ENV_FILE")"
+				ENV_FILE="$new_env"
+				log "Env file updated to: $ENV_FILE"
+				;;
+			18)
 				interactive_keygen
 				;;
 			0)
-				printf '[INFO] Exiting interactive mode.\n'
+				log "Exiting interactive mode."
 				break
 				;;
 			*)
-				printf '[ERROR] Invalid option: %s\n' "$choice" >&2
+				log_error "Invalid option: $choice"
 				;;
 		esac
 	done

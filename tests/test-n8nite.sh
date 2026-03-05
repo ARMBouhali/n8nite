@@ -328,7 +328,9 @@ functional_help_and_errors() {
 	if run_and_capture output "$N8N_SCRIPT" --help \
 		&& check_contains "$output" "n8nite :: opinionated n8n stack on wheels" \
 		&& check_contains "$output" "Unified entrypoint for this n8n stack." \
-		&& check_contains "$output" "uninstall [args...]"; then
+		&& check_contains "$output" "uninstall [args...]" \
+		&& check_contains "$output" "env view [args...]" \
+		&& check_contains "$output" "env edit [args...]"; then
 		pass "n8nite --help prints banner and usage"
 	else
 		fail "n8nite --help failed or banner/usage text changed"
@@ -521,6 +523,81 @@ functional_env_keygen() {
 		fi
 	else
 		fail "env keygen --write --force failed"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
+functional_env_view_edit() {
+	local tmp_dir env_file output mock_bin vi_log nano_log
+	tmp_dir="$(mktemp -d)"
+	env_file="$tmp_dir/local.env"
+	mock_bin="$tmp_dir/mock-bin"
+	vi_log="$tmp_dir/vi.log"
+	nano_log="$tmp_dir/nano.log"
+	cp "$ENV_LOCAL_TEMPLATE" "$env_file"
+	mkdir -p "$mock_bin"
+
+	cat >"$mock_bin/less" <<'EOF'
+#!/usr/bin/env bash
+cat "$1"
+EOF
+
+	cat >"$mock_bin/nano" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${MOCK_NANO_LOG:-}" ]]; then
+	printf '%s\n' "$*" >>"$MOCK_NANO_LOG"
+fi
+if [[ "${1:-}" == "-v" ]]; then
+	shift
+	cat "$1"
+	exit 0
+fi
+if [[ "${MOCK_NANO_FAIL:-0}" == "1" ]]; then
+	exit 1
+fi
+printf '\n# edited-by-mock-nano\n' >>"$1"
+exit 0
+EOF
+
+	cat >"$mock_bin/vi" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${MOCK_VI_LOG:?}"
+exit 0
+EOF
+
+	chmod +x "$mock_bin/less" "$mock_bin/nano" "$mock_bin/vi"
+
+	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_LOG="$nano_log" "$N8N_SCRIPT" --env-file "$env_file" env view; then
+		if check_contains "$output" "N8N_HOST=localhost" && grep -Fq -- "-v $env_file" "$nano_log"; then
+			pass "env view uses nano -v when available"
+		else
+			fail "env view did not use nano -v as expected"
+		fi
+	else
+		fail "env view failed"
+	fi
+
+	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_LOG="$nano_log" "$N8N_SCRIPT" --env-file "$env_file" env edit; then
+		if grep -Fq "# edited-by-mock-nano" "$env_file"; then
+			pass "env edit uses nano when available"
+		else
+			fail "env edit did not modify env file through nano path"
+		fi
+	else
+		fail "env edit failed on nano path"
+	fi
+
+	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_FAIL=1 MOCK_VI_LOG="$vi_log" "$N8N_SCRIPT" --env-file "$env_file" env edit; then
+		if grep -Fq "syntax on" "$vi_log" && grep -Fq "set filetype=sh" "$vi_log"; then
+			pass "env edit falls back to vi with syntax commands when nano fails"
+		else
+			fail "env edit vi fallback did not pass syntax commands"
+		fi
+	else
+		fail "env edit failed on vi fallback path"
 	fi
 
 	rm -rf "$tmp_dir"
@@ -1009,6 +1086,7 @@ check_functional() {
 	functional_env_flow
 	functional_env_validation_matrix
 	functional_env_keygen
+	functional_env_view_edit
 	functional_deps_command
 	functional_install_script
 	functional_symlink_repo_resolution

@@ -232,6 +232,8 @@ Common commands:
 ./n8nite deps check
 ./n8nite deps check --profile nginx-https
 ./n8nite env check
+./n8nite env view
+./n8nite env edit
 ./n8nite env keygen --write --force
 ./n8nite up
 ./n8nite down -v
