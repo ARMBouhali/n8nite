@@ -195,6 +195,24 @@ generate_secure_hex_key() {
 	printf '%s' "$key"
 }
 
+env_file_has_key() {
+	local file="$1"
+	[[ -f "$file" ]] || return 1
+	grep -q '^N8N_ENCRYPTION_KEY=' "$file"
+}
+
+normalize_protocol_value() {
+	local value="$1"
+	value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+	printf '%s' "$value"
+}
+
+default_nginx_conf_name() {
+	local domain="$1"
+	local conf_name="${domain//./-}"
+	printf '%s' "${conf_name:-n8n}"
+}
+
 set_env_key() {
 	local file="$1"
 	local key="$2"
@@ -202,7 +220,7 @@ set_env_key() {
 
 	[[ -f "$file" ]] || fail "Env file not found: $file"
 
-	if grep -q '^N8N_ENCRYPTION_KEY=' "$file"; then
+	if env_file_has_key "$file"; then
 		[[ "$force" -eq 1 ]] || fail "N8N_ENCRYPTION_KEY already exists in $file (use --force to replace)"
 		sed -i "s|^N8N_ENCRYPTION_KEY=.*$|N8N_ENCRYPTION_KEY=${key}|" "$file"
 	else
@@ -584,47 +602,30 @@ get_env_value() {
 }
 
 interactive_nginx_generate() {
-	local default_mode default_server mode server upstream out_dir cert key
+	local default_mode default_server mode server
 	local args=()
 
-	default_mode="$(get_env_value "$ENV_FILE" "N8N_PROTOCOL")"
-	default_mode="${default_mode:-https}"
+	default_mode="$(normalize_protocol_value "$(get_env_value "$ENV_FILE" "N8N_PROTOCOL")")"
+	if [[ "$default_mode" != "http" && "$default_mode" != "https" && "$default_mode" != "both" ]]; then
+		default_mode="https"
+	fi
 	default_server="$(get_env_value "$ENV_FILE" "N8N_HOST")"
 	default_server="${default_server:-localhost}"
 
-	mode="$(prompt_default "Mode (http|https|both)" "$default_mode")"
-	server="$(prompt_default "Server name" "$default_server")"
-	upstream="$(prompt_default "Upstream" "127.0.0.1:5678")"
-	out_dir="$(prompt_default "Output directory" "$REPO_ROOT/nginx/generated")"
+	mode="$default_mode"
+	server="$default_server"
+	args=(-m "$mode" -s "$server")
 
-	args=(-m "$mode" -s "$server" -u "$upstream" -o "$out_dir")
-
-	if [[ "$mode" == "https" || "$mode" == "both" ]]; then
-		cert="$(prompt_default "SSL cert path" "/etc/letsencrypt/live/${server}/fullchain.pem")"
-		key="$(prompt_default "SSL key path" "/etc/letsencrypt/live/${server}/privkey.pem")"
-		args+=(-c "$cert" -k "$key")
-	fi
-
+	log "Using nginx generate defaults: mode=$mode, server=$server, upstream=127.0.0.1:5678, out_dir=$REPO_ROOT/nginx/generated"
 	run_step "nginx generate (${mode})" "$NGINX_GENERATE_SCRIPT" "${args[@]}" || true
 }
 
 interactive_nginx_deploy() {
-	local domain default_conf conf upstream email
-	local args=(--env-file "$ENV_FILE")
-
+	local domain default_conf
 	domain="$(get_env_value "$ENV_FILE" "N8N_HOST")"
-	default_conf="${domain//./-}"
-	default_conf="${default_conf:-n8n}"
-
-	conf="$(prompt_default "Nginx conf name (without .conf)" "$default_conf")"
-	upstream="$(prompt_default "Upstream" "127.0.0.1:5678")"
-	email="$(prompt_default "Certbot email (optional)" "$(get_env_value "$ENV_FILE" "CERTBOT_EMAIL")")"
-
-	[[ -n "$conf" ]] && args+=(-c "$conf")
-	[[ -n "$upstream" ]] && args+=(-u "$upstream")
-	[[ -n "$email" ]] && args+=(-m "$email")
-
-	run_step "nginx deploy" "$NGINX_DEPLOY_SCRIPT" "${args[@]}" || true
+	default_conf="$(default_nginx_conf_name "$domain")"
+	log "Using nginx deploy defaults: conf=$default_conf, upstream=127.0.0.1:5678"
+	run_step "nginx deploy" "$NGINX_DEPLOY_SCRIPT" --env-file "$ENV_FILE" || true
 }
 
 interactive_env_init() {
@@ -633,7 +634,7 @@ interactive_env_init() {
 
 	target="$(prompt_default "Target env file path" "$ENV_FILE")"
 	if [[ -e "$target" ]]; then
-		if confirm_yes_no "Overwrite target file?"; then
+		if confirm_yes_no "Overwrite target file $target?"; then
 			force_flag=(--force)
 		else
 			log "Keeping existing file, skipping env init."
@@ -650,8 +651,13 @@ interactive_keygen() {
 	local args=()
 	if confirm_yes_no "Write key into current env file ($ENV_FILE)?"; then
 		args+=(--write)
-		if confirm_yes_no "Replace existing key if present?"; then
-			args+=(--force)
+		if env_file_has_key "$ENV_FILE"; then
+			if confirm_yes_no "Replace existing key in $ENV_FILE?"; then
+				args+=(--force)
+			else
+				log "Keeping existing N8N_ENCRYPTION_KEY in $ENV_FILE."
+				return 0
+			fi
 		fi
 	fi
 	run_step "env keygen" cmd_env_keygen "${args[@]}" || true

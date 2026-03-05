@@ -875,7 +875,7 @@ EOF
 functional_nginx_deploy_sandboxed() {
 	local output="" tmp_dir mock_bin env_file sites_avail sites_enabled
 	local apt_log sudo_log systemctl_log backup_count_before backup_count_after
-	local conf_name="n8n-test"
+	local conf_name="automation-test"
 	local key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 	tmp_dir="$(mktemp -d)"
@@ -909,7 +909,7 @@ EOF
 		MOCK_SYSTEMCTL_LOG="$systemctl_log" \
 		SITES_AVAILABLE_DIR="$sites_avail" \
 		SITES_ENABLED_DIR="$sites_enabled" \
-		bash -c "printf 'y\n' | \"$NGINX_DEPLOY_SCRIPT\" --env-file \"$env_file\" --conf-name \"$conf_name\" --upstream 127.0.0.1:5678"; then
+		bash -c "printf 'y\n' | \"$NGINX_DEPLOY_SCRIPT\" --env-file \"$env_file\""; then
 		pass "nginx deploy runs successfully in sandboxed temp dirs"
 	else
 		fail "nginx deploy sandboxed run failed"
@@ -956,7 +956,7 @@ EOF
 		MOCK_SYSTEMCTL_LOG="$systemctl_log" \
 		SITES_AVAILABLE_DIR="$sites_avail" \
 		SITES_ENABLED_DIR="$sites_enabled" \
-		bash -c "printf 'y\n' | \"$NGINX_DEPLOY_SCRIPT\" --env-file \"$env_file\" --conf-name \"$conf_name\" --upstream 127.0.0.1:5678"; then
+		bash -c "printf 'y\n' | \"$NGINX_DEPLOY_SCRIPT\" --env-file \"$env_file\""; then
 		pass "nginx deploy second run succeeds in sandboxed temp dirs"
 	else
 		fail "nginx deploy second sandboxed run failed"
@@ -993,6 +993,190 @@ functional_interactive_exit() {
 	else
 		fail "interactive mode failed on immediate exit"
 	fi
+}
+
+functional_interactive_nginx_defaults() {
+	local output="" tmp_dir repo_dir mock_bin env_file sites_avail sites_enabled
+	local apt_log sudo_log systemctl_log generated_conf deployed_conf
+	local key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
+	mock_bin="$tmp_dir/mock-bin"
+	env_file="$tmp_dir/http.env"
+	sites_avail="$tmp_dir/sites-available"
+	sites_enabled="$tmp_dir/sites-enabled"
+	apt_log="$tmp_dir/apt.log"
+	sudo_log="$tmp_dir/sudo.log"
+	systemctl_log="$tmp_dir/systemctl.log"
+	generated_conf="$repo_dir/nginx/generated/automation.test.http.conf"
+	deployed_conf="$sites_avail/automation-test.conf"
+
+	mkdir -p "$repo_dir/nginx/templates"
+	cp "$N8N_SCRIPT" "$repo_dir/n8nite"
+	cp "$REPO_ROOT/check-env.sh" "$repo_dir/check-env.sh"
+	cp "$REPO_ROOT/nginx/generate-nginx-conf.sh" "$repo_dir/nginx/generate-nginx-conf.sh"
+	cp "$REPO_ROOT/nginx/install-nginx-and-deploy.sh" "$repo_dir/nginx/install-nginx-and-deploy.sh"
+	cp "$REPO_ROOT/nginx/templates/"* "$repo_dir/nginx/templates/"
+	chmod +x "$repo_dir/n8nite" "$repo_dir/check-env.sh" "$repo_dir/nginx/generate-nginx-conf.sh" "$repo_dir/nginx/install-nginx-and-deploy.sh"
+
+	create_nginx_deploy_mock_bin "$mock_bin"
+
+	cat >"$env_file" <<EOF
+N8N_HOST=automation.test
+N8N_PROTOCOL=http
+WEBHOOK_URL=http://automation.test/
+N8N_ENCRYPTION_KEY=$key
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=admin_pass
+POSTGRES_DB=n8n
+POSTGRES_NON_ROOT_USER=n8n_user
+POSTGRES_NON_ROOT_PASSWORD=n8n_user_pass
+EOF
+
+	if run_and_capture output env PATH="$mock_bin:$PATH" bash -c "printf '13\n0\n' | \"$repo_dir/n8nite\" --env-file \"$env_file\" interactive"; then
+		if [[ -f "$generated_conf" ]]; then
+			pass "interactive nginx generate uses env defaults without extra prompts"
+		else
+			fail "interactive nginx generate did not write the default output file"
+		fi
+
+		if check_contains "$output" "Using nginx generate defaults: mode=http, server=automation.test"; then
+			pass "interactive nginx generate reports the detected defaults it used"
+		else
+			fail "interactive nginx generate did not report detected defaults"
+		fi
+	else
+		fail "interactive nginx generate failed with env-derived defaults"
+		rm -rf "$tmp_dir"
+		return
+	fi
+
+	if run_and_capture output \
+		env \
+		PATH="$mock_bin:$PATH" \
+		MOCK_APT_LOG="$apt_log" \
+		MOCK_SUDO_LOG="$sudo_log" \
+		MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+		SITES_AVAILABLE_DIR="$sites_avail" \
+		SITES_ENABLED_DIR="$sites_enabled" \
+		bash -c "printf '14\ny\n0\n' | \"$repo_dir/n8nite\" --env-file \"$env_file\" interactive"; then
+		if [[ -f "$deployed_conf" ]]; then
+			pass "interactive nginx deploy uses detected defaults without extra prompts"
+		else
+			fail "interactive nginx deploy did not write the default config path"
+		fi
+
+		if check_contains "$output" "Using nginx deploy defaults: conf=automation-test, upstream=127.0.0.1:5678"; then
+			pass "interactive nginx deploy reports the detected defaults it used"
+		else
+			fail "interactive nginx deploy did not report detected defaults"
+		fi
+	else
+		fail "interactive nginx deploy failed with detected defaults"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
+functional_interactive_prompt_minimization() {
+	if grep -Fq 'Overwrite target file $target?' "$N8N_SCRIPT"; then
+		pass "interactive env init overwrite prompt includes detected target path"
+	else
+		fail "interactive env init overwrite prompt did not include detected target path"
+	fi
+
+	if grep -Fq 'Overwrite target file?' "$N8N_SCRIPT"; then
+		fail "interactive env init still uses generic overwrite prompt"
+	else
+		pass "interactive env init no longer uses generic overwrite prompt"
+	fi
+
+	if grep -Fq 'Certbot email (optional)' "$N8N_SCRIPT"; then
+		fail "interactive nginx deploy still prompts for certbot email up front"
+	else
+		pass "interactive nginx deploy no longer prompts for certbot email up front"
+	fi
+
+	if grep -Fq 'Nginx conf name (without .conf)' "$N8N_SCRIPT"; then
+		fail "interactive nginx deploy still prompts for nginx conf name"
+	else
+		pass "interactive nginx deploy now relies on detected/default conf name"
+	fi
+
+	if grep -Fq 'Upstream' "$N8N_SCRIPT"; then
+		fail "interactive nginx generate/deploy still prompt for upstream defaults"
+	else
+		pass "interactive nginx generate/deploy now rely on default upstream"
+	fi
+
+	if grep -Fq 'Mode (http|https|both)' "$N8N_SCRIPT" || grep -Fq 'Server name' "$N8N_SCRIPT"; then
+		fail "interactive nginx generate still prompts for env-derived mode or server"
+	else
+		pass "interactive nginx generate now uses env-derived mode and server"
+	fi
+
+	if grep -Fq 'SSL cert path' "$N8N_SCRIPT" || grep -Fq 'SSL key path' "$N8N_SCRIPT"; then
+		fail "interactive nginx generate still prompts for default SSL paths"
+	else
+		pass "interactive nginx generate no longer prompts for default SSL paths"
+	fi
+}
+
+functional_interactive_keygen_prompt() {
+	local tmp_dir env_with_key env_without_key output existing_key retained_key
+	tmp_dir="$(mktemp -d)"
+	env_with_key="$tmp_dir/with-key.env"
+	env_without_key="$tmp_dir/without-key.env"
+
+	cp "$ENV_LOCAL_TEMPLATE" "$env_with_key"
+	existing_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_with_key" | cut -d= -f2- || true)"
+	cat >"$env_without_key" <<'EOF'
+N8N_HOST=localhost
+EOF
+
+	if run_and_capture output bash -c "printf '5\ny\nn\n0\n' | \"$N8N_SCRIPT\" --env-file \"$env_with_key\" interactive"; then
+		retained_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_with_key" | cut -d= -f2- || true)"
+		if grep -Fq 'Replace existing key in $ENV_FILE?' "$N8N_SCRIPT"; then
+			pass "interactive keygen prompt text is tied to the detected env path"
+		else
+			fail "interactive keygen prompt text was not updated to use detected env path"
+		fi
+
+		if grep -Fq 'Replace existing key if present?' "$N8N_SCRIPT"; then
+			fail "interactive keygen still uses generic if-present prompt"
+		else
+			pass "interactive keygen no longer uses generic if-present prompt"
+		fi
+
+		if [[ -n "$existing_key" && "$retained_key" == "$existing_key" ]]; then
+			pass "interactive keygen keeps existing key unchanged when replacement is declined"
+		else
+			fail "interactive keygen changed existing key after replacement was declined"
+		fi
+	else
+		fail "interactive keygen failed while checking existing-key prompt"
+		rm -rf "$tmp_dir"
+		return
+	fi
+
+	if run_and_capture output bash -c "printf '5\ny\n0\n' | \"$N8N_SCRIPT\" --env-file \"$env_without_key\" interactive"; then
+		if check_contains "$output" "Replace existing key"; then
+			fail "interactive keygen prompted for replacement even though no key existed"
+		else
+			pass "interactive keygen skips replacement prompt when env file has no key"
+		fi
+
+		if grep -Eq '^N8N_ENCRYPTION_KEY=[0-9a-f]{64}$' "$env_without_key"; then
+			pass "interactive keygen writes a generated key when env file has no existing key"
+		else
+			fail "interactive keygen did not write a generated key for env file without one"
+		fi
+	else
+		fail "interactive keygen failed while checking missing-key prompt"
+	fi
+
+	rm -rf "$tmp_dir"
 }
 
 functional_queue_services_declared() {
@@ -1094,6 +1278,9 @@ check_functional() {
 	functional_nginx_generate
 	functional_nginx_deploy_sandboxed
 	functional_interactive_exit
+	functional_interactive_nginx_defaults
+	functional_interactive_prompt_minimization
+	functional_interactive_keygen_prompt
 	functional_queue_services_declared
 	functional_compose_delegation
 }

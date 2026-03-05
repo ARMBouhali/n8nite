@@ -10,7 +10,8 @@ Usage:
 
 Options:
   -e, --env-file PATH  Path to env file (default: <repo>/.env)
-  -c, --conf-name NAME Nginx conf name without .conf (if omitted, you will be prompted)
+  -c, --conf-name NAME Nginx conf name without .conf
+                       (default: N8N_HOST with dots replaced by dashes)
   -u, --upstream ADDR  Upstream for n8n proxy (default: 127.0.0.1:5678)
   -m, --email EMAIL    Certbot email (required for new HTTPS cert issuance)
   --help               Show this help
@@ -175,8 +176,7 @@ CERTBOT_DHPARAM="${CERTBOT_DHPARAM:-/etc/letsencrypt/ssl-dhparams.pem}"
 
 if [[ -z "$CONF_NAME" ]]; then
 	default_conf_name="${DOMAIN//./-}"
-	read -r -p "Nginx conf name (without .conf) [${default_conf_name}]: " CONF_NAME_INPUT
-	CONF_NAME="${CONF_NAME_INPUT:-$default_conf_name}"
+	CONF_NAME="${default_conf_name:-n8n}"
 fi
 [[ -n "$CONF_NAME" ]] || fail "Conf name cannot be empty"
 
