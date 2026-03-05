@@ -1,0 +1,643 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<'EOF'
+Unified entrypoint for this n8n stack.
+
+Usage:
+  ./n8nite [global-options] COMMAND [args...]
+
+Global options:
+  -e, --env-file PATH  Env file to use (default: <repo>/.env)
+  -v, --version        Show version
+  -h, --help           Show this help
+
+Commands:
+  deps check [args...]                Check host dependencies (wraps check-deps.sh)
+  env check [args...]                 Validate env file (wraps check-env.sh)
+  env init [local|prod] [--force]     Create env file from template
+  env keygen [--write] [--force]      Generate secure N8N_ENCRYPTION_KEY
+
+  up [compose args...]                Validate env, then docker compose up -d
+  down [compose args...]              docker compose down
+  start [services...]                 docker compose start
+  stop [services...]                  docker compose stop
+  restart [services...]               docker compose restart
+  logs [services...]                  docker compose logs --tail=200 -f
+  ps                                  docker compose ps
+  config                              docker compose config
+  pull [services...]                  docker compose pull
+
+  nginx generate [args...]            Wrap nginx/generate-nginx-conf.sh
+  nginx deploy [args...]              Wrap nginx/install-nginx-and-deploy.sh
+
+  interactive | i                     Launch interactive menu
+  doctor                              Run env validation + docker compose ps
+  test [suite args...]                Run tests/test-n8nite.sh
+
+Examples:
+  ./n8nite deps check
+  ./n8nite deps check --profile nginx-https
+  ./n8nite env init local --force
+  ./n8nite env check
+  ./n8nite -e ./.env env check -n
+  ./n8nite env keygen --write --force
+  ./n8nite up
+  ./n8nite logs n8n
+  ./n8nite interactive
+  ./n8nite nginx generate -m https -s automation.example.com
+  ./n8nite nginx deploy -c n8n-automation -m admin@example.com
+  ./n8nite test -f
+EOF
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
+COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+ENV_FILE="$REPO_ROOT/.env"
+
+CHECK_ENV_SCRIPT="$REPO_ROOT/check-env.sh"
+CHECK_DEPS_SCRIPT="$REPO_ROOT/check-deps.sh"
+NGINX_GENERATE_SCRIPT="$REPO_ROOT/nginx/generate-nginx-conf.sh"
+NGINX_DEPLOY_SCRIPT="$REPO_ROOT/nginx/install-nginx-and-deploy.sh"
+TEST_SUITE_SCRIPT="$REPO_ROOT/tests/test-n8nite.sh"
+ENV_TEMPLATE_PROD="$REPO_ROOT/.env.example"
+ENV_TEMPLATE_LOCAL="$REPO_ROOT/.env.local.example"
+N8NITE_VERSION="${N8NITE_VERSION:-0.1.0}"
+
+supports_color() {
+	[[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]] && [[ "${TERM:-}" != "dumb" ]]
+}
+
+print_banner() {
+	local reset="" green=""
+
+	if supports_color; then
+		reset=$'\033[0m'
+		green=$'\033[38;5;118m'
+	fi
+
+	printf '\n'
+	printf '%b\n' "${green}            ░██████             ░██   ░██               ${reset}"
+	printf '%b\n' "${green}           ░██   ░██                  ░██               ${reset}"
+	printf '%b\n' "${green}░████████  ░██   ░██ ░████████  ░██░████████  ░███████  ${reset}"
+	printf '%b\n' "${green}░██    ░██  ░██████  ░██    ░██ ░██   ░██    ░██    ░██ ${reset}"
+	printf '%b\n' "${green}░██    ░██ ░██   ░██ ░██    ░██ ░██   ░██    ░█████████ ${reset}"
+	printf '%b\n' "${green}░██    ░██ ░██   ░██ ░██    ░██ ░██   ░██    ░██        ${reset}"
+	printf '%b\n' "${green}░██    ░██  ░██████  ░██    ░██ ░██    ░████  ░███████${reset}"
+	printf '\n'
+	printf '%b\n' "${green}n8nite :: opinionated n8n stack on wheels${reset}"
+	printf '\n'
+}
+
+print_version() {
+	printf 'n8nite %s\n' "$N8NITE_VERSION"
+}
+
+log() {
+	printf '[INFO] %s\n' "$*"
+}
+
+fail() {
+	printf '[ERROR] %s\n' "$*" >&2
+	exit 1
+}
+
+require_file() {
+	local file="$1"
+	[[ -f "$file" ]] || fail "Required file not found: $file"
+}
+
+require_exec() {
+	local file="$1"
+	[[ -x "$file" ]] || fail "Required executable not found: $file"
+}
+
+run_compose() {
+	command -v docker >/dev/null 2>&1 || fail "docker command not found"
+	require_file "$COMPOSE_FILE"
+	docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+run_env_check() {
+	require_exec "$CHECK_ENV_SCRIPT"
+	"$CHECK_ENV_SCRIPT" --env-file "$ENV_FILE" "$@"
+}
+
+run_deps_check() {
+	require_exec "$CHECK_DEPS_SCRIPT"
+	"$CHECK_DEPS_SCRIPT" --env-file "$ENV_FILE" "$@"
+}
+
+generate_secure_hex_key() {
+	local key=""
+	if command -v openssl >/dev/null 2>&1; then
+		key="$(openssl rand -hex 32 | tr -d '\n')"
+	elif [[ -r /dev/urandom ]]; then
+		key="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+	else
+		fail "Cannot generate key: neither openssl nor /dev/urandom is available"
+	fi
+
+	[[ "${#key}" -ge 64 ]] || fail "Generated key is too short"
+	printf '%s' "$key"
+}
+
+set_env_key() {
+	local file="$1"
+	local key="$2"
+	local force="$3"
+
+	[[ -f "$file" ]] || fail "Env file not found: $file"
+
+	if grep -q '^N8N_ENCRYPTION_KEY=' "$file"; then
+		[[ "$force" -eq 1 ]] || fail "N8N_ENCRYPTION_KEY already exists in $file (use --force to replace)"
+		sed -i "s|^N8N_ENCRYPTION_KEY=.*$|N8N_ENCRYPTION_KEY=${key}|" "$file"
+	else
+		printf '\nN8N_ENCRYPTION_KEY=%s\n' "$key" >>"$file"
+	fi
+}
+
+cmd_env_init() {
+	local profile="prod"
+	local force=0
+	local target="$ENV_FILE"
+	local template=""
+
+	while (($# > 0)); do
+		case "$1" in
+			local)
+				profile="local"
+				shift
+				;;
+			prod|production)
+				profile="prod"
+				shift
+				;;
+			--target|-t)
+				target="${2:-}"
+				shift 2
+				;;
+			--force|-f)
+				force=1
+				shift
+				;;
+			-h|--help)
+				cat <<'EOF'
+Usage:
+  ./n8nite [-e PATH|--env-file PATH] env init [local|prod] [-t PATH|--target PATH] [--force]
+
+Defaults:
+  profile: prod
+  target:  <env-file> global option (or <repo>/.env)
+EOF
+				return 0
+				;;
+			*)
+				fail "Unknown env init argument: $1"
+				;;
+		esac
+	done
+
+	if [[ "$profile" == "local" ]]; then
+		template="$ENV_TEMPLATE_LOCAL"
+	else
+		template="$ENV_TEMPLATE_PROD"
+	fi
+
+	require_file "$template"
+
+	if [[ -e "$target" && "$force" -ne 1 ]]; then
+		fail "Target env file already exists: $target (use --force to overwrite)"
+	fi
+
+	cp "$template" "$target"
+	log "Created env file from template '$profile': $target"
+	log "Next: ./n8nite -e $target env check"
+}
+
+cmd_env_keygen() {
+	local write=0
+	local force=0
+	local plain=0
+	local key=""
+
+	while (($# > 0)); do
+		case "$1" in
+			--write|-w)
+				write=1
+				shift
+				;;
+			--force|-f)
+				force=1
+				shift
+				;;
+			--plain|-p)
+				plain=1
+				shift
+				;;
+			-h|--help)
+				cat <<'EOF'
+Usage:
+  ./n8nite [-e PATH|--env-file PATH] env keygen [--write] [--force] [--plain]
+
+Options:
+  -w, --write    Write generated key to N8N_ENCRYPTION_KEY in env file
+  -f, --force    Replace existing N8N_ENCRYPTION_KEY when used with --write
+  -p, --plain    Print raw key only (without N8N_ENCRYPTION_KEY= prefix)
+EOF
+				return 0
+				;;
+			*)
+				fail "Unknown env keygen argument: $1"
+				;;
+		esac
+	done
+
+	key="$(generate_secure_hex_key)"
+
+	if [[ "$write" -eq 1 ]]; then
+		set_env_key "$ENV_FILE" "$key" "$force"
+		log "Updated N8N_ENCRYPTION_KEY in $ENV_FILE"
+	fi
+
+	if [[ "$plain" -eq 1 ]]; then
+		printf '%s\n' "$key"
+	else
+		printf 'N8N_ENCRYPTION_KEY=%s\n' "$key"
+	fi
+}
+
+cmd_env() {
+	local subcommand="${1:-check}"
+	if [[ $# -gt 0 ]]; then
+		shift
+	fi
+
+	case "$subcommand" in
+		check)
+			run_env_check "$@"
+			;;
+		init)
+			cmd_env_init "$@"
+			;;
+		keygen)
+			cmd_env_keygen "$@"
+			;;
+		*)
+			fail "Unknown env subcommand: $subcommand"
+			;;
+	esac
+}
+
+cmd_deps() {
+	local subcommand="${1:-check}"
+	if [[ $# -gt 0 ]]; then
+		shift
+	fi
+
+	case "$subcommand" in
+		check)
+			run_deps_check "$@"
+			;;
+		-h|--help|help)
+			run_deps_check --help
+			;;
+		*)
+			fail "Unknown deps subcommand: $subcommand"
+			;;
+	esac
+}
+
+cmd_nginx() {
+	local subcommand="${1:-}"
+	if [[ $# -gt 0 ]]; then
+		shift
+	fi
+
+	case "$subcommand" in
+		generate)
+			require_exec "$NGINX_GENERATE_SCRIPT"
+			"$NGINX_GENERATE_SCRIPT" "$@"
+			;;
+		deploy)
+			require_exec "$NGINX_DEPLOY_SCRIPT"
+			"$NGINX_DEPLOY_SCRIPT" --env-file "$ENV_FILE" "$@"
+			;;
+		*)
+			fail "Unknown nginx subcommand: ${subcommand:-<empty>} (use: generate|deploy)"
+			;;
+	esac
+}
+
+prompt_default() {
+	local label="$1"
+	local default_value="${2:-}"
+	local value=""
+	if [[ -n "$default_value" ]]; then
+		read -r -p "$label [$default_value]: " value
+		printf '%s' "${value:-$default_value}"
+	else
+		read -r -p "$label: " value
+		printf '%s' "$value"
+	fi
+}
+
+confirm_yes_no() {
+	local label="$1"
+	local answer=""
+	read -r -p "$label [y/N]: " answer
+	[[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+run_step() {
+	local label="$1"
+	shift
+	printf '\n[RUN] %s\n' "$label"
+	if "$@"; then
+		printf '[OK] %s\n' "$label"
+		return 0
+	fi
+	local rc=$?
+	printf '[FAIL] %s (exit %d)\n' "$label" "$rc" >&2
+	return "$rc"
+}
+
+get_env_value() {
+	local file="$1"
+	local key="$2"
+	[[ -f "$file" ]] || return 0
+	(
+		set -a
+		# shellcheck disable=SC1090
+		source "$file" >/dev/null 2>&1 || true
+		eval "printf '%s' \"\${$key:-}\""
+	)
+}
+
+interactive_nginx_generate() {
+	local default_mode default_server mode server upstream out_dir cert key
+	local args=()
+
+	default_mode="$(get_env_value "$ENV_FILE" "N8N_PROTOCOL")"
+	default_mode="${default_mode:-https}"
+	default_server="$(get_env_value "$ENV_FILE" "N8N_HOST")"
+	default_server="${default_server:-localhost}"
+
+	mode="$(prompt_default "Mode (http|https|both)" "$default_mode")"
+	server="$(prompt_default "Server name" "$default_server")"
+	upstream="$(prompt_default "Upstream" "127.0.0.1:5678")"
+	out_dir="$(prompt_default "Output directory" "$REPO_ROOT/nginx/generated")"
+
+	args=(-m "$mode" -s "$server" -u "$upstream" -o "$out_dir")
+
+	if [[ "$mode" == "https" || "$mode" == "both" ]]; then
+		cert="$(prompt_default "SSL cert path" "/etc/letsencrypt/live/${server}/fullchain.pem")"
+		key="$(prompt_default "SSL key path" "/etc/letsencrypt/live/${server}/privkey.pem")"
+		args+=(-c "$cert" -k "$key")
+	fi
+
+	run_step "nginx generate (${mode})" "$NGINX_GENERATE_SCRIPT" "${args[@]}" || true
+}
+
+interactive_nginx_deploy() {
+	local domain default_conf conf upstream email
+	local args=(--env-file "$ENV_FILE")
+
+	domain="$(get_env_value "$ENV_FILE" "N8N_HOST")"
+	default_conf="${domain//./-}"
+	default_conf="${default_conf:-n8n}"
+
+	conf="$(prompt_default "Nginx conf name (without .conf)" "$default_conf")"
+	upstream="$(prompt_default "Upstream" "127.0.0.1:5678")"
+	email="$(prompt_default "Certbot email (optional)" "$(get_env_value "$ENV_FILE" "CERTBOT_EMAIL")")"
+
+	[[ -n "$conf" ]] && args+=(-c "$conf")
+	[[ -n "$upstream" ]] && args+=(-u "$upstream")
+	[[ -n "$email" ]] && args+=(-m "$email")
+
+	run_step "nginx deploy" "$NGINX_DEPLOY_SCRIPT" "${args[@]}" || true
+}
+
+interactive_env_init() {
+	local profile="$1"
+	local target force_flag=()
+
+	target="$(prompt_default "Target env file path" "$ENV_FILE")"
+	if confirm_yes_no "Overwrite target if it already exists?"; then
+		force_flag=(--force)
+	fi
+
+	run_step "env init (${profile})" cmd_env_init "$profile" --target "$target" "${force_flag[@]}" || true
+	ENV_FILE="$target"
+}
+
+interactive_keygen() {
+	local args=()
+	if confirm_yes_no "Write key into current env file ($ENV_FILE)?"; then
+		args+=(--write)
+		if confirm_yes_no "Replace existing key if present?"; then
+			args+=(--force)
+		fi
+	fi
+	run_step "env keygen" cmd_env_keygen "${args[@]}" || true
+}
+
+interactive_logs() {
+	local service follow="n" cmd=(logs --tail=200)
+	service="$(prompt_default "Service name (blank for all)" "")"
+	if confirm_yes_no "Follow logs in real time?"; then
+		follow="y"
+		cmd=(logs --tail=200 -f)
+	fi
+	[[ -n "$service" ]] && cmd+=("$service")
+
+	if [[ "$follow" == "y" ]]; then
+		printf '\n[INFO] Press Ctrl+C to stop log streaming and return to menu.\n'
+	fi
+	run_step "docker compose logs" run_compose "${cmd[@]}" || true
+}
+
+interactive_menu() {
+	local choice=""
+	local new_env=""
+
+	print_banner
+
+	while true; do
+		cat <<EOF
+
+=== n8nite Interactive Menu ===
+Env file: $ENV_FILE
+
+1) Env check
+2) Env init (local)
+3) Env init (prod)
+4) Stack up
+5) Stack down
+6) Stack restart
+7) Stack status (ps)
+8) Stack logs
+9) Nginx generate
+10) Nginx deploy
+11) Deps check
+12) Test suite (functional)
+13) Test suite (requirements)
+14) Doctor
+15) Change env file
+16) Generate N8N key
+0) Exit
+EOF
+		read -r -p "Choose an action [0-16]: " choice
+
+		case "$choice" in
+			1)
+				run_step "env check" run_env_check || true
+				;;
+			2)
+				interactive_env_init "local"
+				;;
+			3)
+				interactive_env_init "prod"
+				;;
+			4)
+				run_step "stack up" run_env_check && run_step "docker compose up -d" run_compose up -d || true
+				;;
+			5)
+				run_step "docker compose down" run_compose down || true
+				;;
+			6)
+				run_step "docker compose restart" run_compose restart || true
+				;;
+			7)
+				run_step "docker compose ps" run_compose ps || true
+				;;
+			8)
+				interactive_logs
+				;;
+			9)
+				interactive_nginx_generate
+				;;
+			10)
+				interactive_nginx_deploy
+				;;
+			11)
+				run_step "deps check" run_deps_check || true
+				;;
+			12)
+				run_step "test suite (functional)" "$TEST_SUITE_SCRIPT" -f || true
+				;;
+			13)
+				run_step "test suite (requirements)" "$TEST_SUITE_SCRIPT" -r || true
+				;;
+			14)
+				run_step "doctor" run_env_check && run_step "docker compose ps" run_compose ps || true
+				;;
+			15)
+				new_env="$(prompt_default "New env file path" "$ENV_FILE")"
+				ENV_FILE="$new_env"
+				printf '[INFO] Env file updated to: %s\n' "$ENV_FILE"
+				;;
+			16)
+				interactive_keygen
+				;;
+			0)
+				printf '[INFO] Exiting interactive mode.\n'
+				break
+				;;
+			*)
+				printf '[ERROR] Invalid option: %s\n' "$choice" >&2
+				;;
+		esac
+	done
+}
+
+while (($# > 0)); do
+	case "$1" in
+		--env-file|-e)
+			ENV_FILE="${2:-}"
+			shift 2
+			;;
+		-v|--version)
+			print_banner
+			print_version
+			exit 0
+			;;
+		-h|--help)
+			print_banner
+			usage
+			exit 0
+			;;
+		--)
+			shift
+			break
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+command="${1:-help}"
+if [[ $# -gt 0 ]]; then
+	shift
+fi
+
+case "$command" in
+	help|-h|--help)
+		print_banner
+		usage
+		;;
+	env)
+		cmd_env "$@"
+		;;
+	deps)
+		cmd_deps "$@"
+		;;
+	up)
+		run_env_check
+		run_compose up -d "$@"
+		;;
+	down)
+		run_compose down "$@"
+		;;
+	start)
+		run_compose start "$@"
+		;;
+	stop)
+		run_compose stop "$@"
+		;;
+	restart)
+		run_compose restart "$@"
+		;;
+	logs)
+		run_compose logs --tail=200 -f "$@"
+		;;
+	ps|status)
+		run_compose ps "$@"
+		;;
+	config)
+		run_compose config "$@"
+		;;
+	pull)
+		run_compose pull "$@"
+		;;
+	nginx)
+		cmd_nginx "$@"
+		;;
+	interactive|i)
+		interactive_menu
+		;;
+	test)
+		require_exec "$TEST_SUITE_SCRIPT"
+		"$TEST_SUITE_SCRIPT" "$@"
+		;;
+	doctor)
+		run_env_check
+		run_compose ps
+		;;
+	*)
+		fail "Unknown command: $command (run ./n8nite --help)"
+		;;
+esac

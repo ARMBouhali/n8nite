@@ -1,1 +1,14 @@
+# Local environment files
 .env
+.env.*
+!.env.example
+!.env.local.example
+
+# Generated nginx configs
+nginx/generated/
+
+# Local backup/temp/editor artifacts
+*.bak
+*.log
+*.swp
+*~

@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+if [ -n "${POSTGRES_NON_ROOT_USER:-}" ] && [ -n "${POSTGRES_NON_ROOT_PASSWORD:-}" ]
+then
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<EOSQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${POSTGRES_NON_ROOT_USER}') THEN
+        EXECUTE format(
+            'CREATE ROLE %I WITH LOGIN PASSWORD %L',
+            '${POSTGRES_NON_ROOT_USER}',
+            '${POSTGRES_NON_ROOT_PASSWORD}'
+        );
+    END IF;
+END
+\$\$;
+
+GRANT ALL PRIVILEGES ON DATABASE ${POSTGRES_DB} TO ${POSTGRES_NON_ROOT_USER};
+GRANT ALL ON SCHEMA public TO ${POSTGRES_NON_ROOT_USER};
+EOSQL
+else
+    echo "SETUP INFO: No Environment variables given!"
+fi
