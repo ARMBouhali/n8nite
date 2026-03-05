@@ -32,26 +32,23 @@
 # 1) Install 📦
 curl -fsSL https://raw.githubusercontent.com/ARMBouhali/n8nite/main/install.sh | bash
 
-# 2) Create env 🧩
+# 2) Create env with generated secrets 🧩
 n8nite env init prod
 
 # 3) Check host dependencies (auto profile based on .env) 🔎
 n8nite deps check
 
-# 4) Generate secure encryption key 🔐
-n8nite env keygen --write --force
-
-# 5) Edit .env values, then validate ✅
+# 4) Edit domain values, then validate ✅
 n8nite env check
 
-# 6) Start stack ▶️
+# 5) Start stack ▶️
 n8nite up
 
-# 7) Generate and deploy nginx config (deploy needs sudo) 🌐
+# 6) Generate and deploy nginx config (deploy needs sudo) 🌐
 n8nite nginx generate -m https -s automation.example.com
 sudo n8nite nginx deploy -c n8n-automation -u 127.0.0.1:5678 -m admin@example.com
 
-# 8) Verify logs 📜
+# 7) Verify logs 📜
 n8nite logs n8n
 n8nite logs n8n-worker
 ```
@@ -97,6 +94,7 @@ You are still welcome to fork, adapt, and contribute if useful for your own setu
 ├── nginx/
 │   ├── generate-nginx-conf.sh
 │   ├── install-nginx-and-deploy.sh
+│   ├── restore-nginx-conf.sh
 │   └── templates/
 │       ├── n8n-http.conf.tmpl
 │       └── n8n-https.conf.tmpl
@@ -175,22 +173,38 @@ curl -fsSL https://raw.githubusercontent.com/ARMBouhali/n8nite/main/install.sh \
 
 ### 1) Initialize an env file
 
-Production-style template:
-
-```bash
-cp .env.example .env
-```
-
-Or generate via CLI:
+Production-style env with generated key/passwords:
 
 ```bash
 ./n8nite env init prod
 ```
 
-Local HTTP profile:
+Local HTTP profile with generated key/passwords:
 
 ```bash
 ./n8nite env init local --force
+```
+
+Copy an existing env file into the repo `.env`:
+
+```bash
+./n8nite env select ./envs/local-http.env
+```
+
+What `env init` does explicitly:
+
+- copies the selected template into repo `.env`
+- generates a fresh `N8N_ENCRYPTION_KEY`
+- generates fresh `POSTGRES_PASSWORD` and `POSTGRES_NON_ROOT_PASSWORD`
+- sets explicit postgres usernames (`n8n_admin` / `n8n_user`)
+- creates a readable timestamped backup first when repo `.env` already exists
+
+If you need to roll back an env overwrite:
+
+```bash
+./n8nite env restore
+# or restore the newest backup directly
+./n8nite env restore --latest --yes
 ```
 
 ### 2) Validate configuration
@@ -231,7 +245,10 @@ Common commands:
 ```bash
 ./n8nite deps check
 ./n8nite deps check --profile nginx-https
+./n8nite env init prod
+./n8nite env select ./envs/local-http.env
 ./n8nite env check
+./n8nite env restore --latest --yes
 ./n8nite env view
 ./n8nite env edit
 ./n8nite env keygen --write --force
@@ -240,6 +257,7 @@ Common commands:
 ./n8nite restart n8n
 ./n8nite doctor
 ./n8nite uninstall --yes
+./n8nite nginx restore -c n8n-automation --latest --yes
 ```
 
 Interactive mode:
@@ -252,8 +270,6 @@ Interactive mode:
 
 Useful short options:
 
-- `-e` for `--env-file`
-- `-t` for `env init --target`
 - `-r` for test requirements-only
 - `-f` for test functional-only
 
@@ -267,7 +283,11 @@ Use one of these as the source template:
 Required values are grouped at the top of each file.
 Optional n8n tuning variables are documented at the end of each file with comments.
 `N8N_ENCRYPTION_KEY` is required in this stack because main + worker must share credential encryption.
-You can generate one securely with `./n8nite env keygen --write --force`.
+`n8nite` always operates on repo `.env`.
+`./n8nite env init local|prod` creates or replaces that `.env` with generated secrets.
+`./n8nite env select PATH` copies an existing env file into repo `.env`.
+Production init still leaves the domain placeholders in place so you can set the real hostname before validation.
+If `env init --force` overwrites a file, restore it later with `./n8nite env restore`.
 
 Primary n8n env documentation:
 
@@ -294,7 +314,7 @@ Generated files are written to `./nginx/generated/` by default.
 ### Install + deploy Nginx config
 
 ```bash
-./n8nite -e ./.env nginx deploy \
+./n8nite nginx deploy \
   -c n8n-automation \
   -u 127.0.0.1:5678 \
   -m admin@example.com
@@ -306,8 +326,16 @@ The deploy flow is fail-fast (`set -euo pipefail`) and includes:
 2. 📦 dependency install (nginx/gettext, certbot for HTTPS)
 3. 🔐 certificate check/creation for HTTPS
 4. 📝 config generation + review prompt
-5. 💾 existing nginx conf backup (timestamped) if target exists
+5. 💾 existing nginx conf backup (`YYYY-MM-DD_HH-MM-SS`) if target exists
 6. 🧪 nginx validation + restart
+
+Restore an nginx backup when needed:
+
+```bash
+./n8nite nginx restore -c n8n-automation
+# or restore the newest backup directly
+./n8nite nginx restore -c n8n-automation --latest --yes
+```
 
 ## Testing
 
@@ -331,20 +359,20 @@ Requirements audit only:
 
 Safety model for functional tests:
 
-- 🧪 tests use temporary directories for env files, nginx site paths, and HOME
+- 🧪 tests use temporary repo copies, env files, nginx site paths, and HOME
 - 🛡️ privileged/deploy commands are mocked (`sudo`, `apt-get`, `systemctl`, `nginx`) in test scope
 - 🚫 tests do not deploy to real nginx locations and do not modify your real shell rc files
 
 ### Currently Covered
 
 - CLI help and unknown-command handling
-- env init/check flow (including missing-required-variable failure)
+- env init/check/restore flow (including generated secrets and missing-required-variable failure)
 - env validation matrix (`check-env.sh` protocol mismatch, host mismatch, placeholder failure)
 - encryption key generation (`env keygen`), including `--write` force guard behavior
 - dependency command wiring + profile execution matrix (`deps check` auto/core/nginx-https behavior)
 - installer presence/syntax/help + rc persistence behavior in isolated HOME
 - nginx config generation
-- nginx deploy flow in sandboxed temp dirs (no real `/etc/nginx` writes)
+- nginx deploy/restore flow in sandboxed temp dirs (no real `/etc/nginx` writes)
 - interactive mode immediate-exit flow
 - compose queue service declarations (`redis`, `n8n-worker`)
 - docker compose delegation for `config` and `up`

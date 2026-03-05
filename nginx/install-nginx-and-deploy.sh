@@ -51,7 +51,7 @@ backup_existing_conf() {
 	local timestamp backup_path counter
 
 	if run_root test -e "$target" || run_root test -L "$target"; then
-		timestamp="$(date +%Y%m%d%H%M%S)"
+		timestamp="$(date '+%Y-%m-%d_%H-%M-%S')"
 		backup_path="${target}.bak.${timestamp}"
 		counter=0
 		while run_root test -e "$backup_path" || run_root test -L "$backup_path"; do
@@ -243,3 +243,4 @@ run_root systemctl enable nginx
 run_root systemctl restart nginx
 
 log "Success. Deployed ${FINAL_CONF}"
+log "Restore a prior backup with: ./n8nite nginx restore -c ${CONF_NAME}"

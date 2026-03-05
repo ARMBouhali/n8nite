@@ -45,6 +45,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 N8N_SCRIPT="$REPO_ROOT/n8nite"
 INSTALL_SCRIPT="$REPO_ROOT/install.sh"
 NGINX_DEPLOY_SCRIPT="$REPO_ROOT/nginx/install-nginx-and-deploy.sh"
+NGINX_RESTORE_SCRIPT="$REPO_ROOT/nginx/restore-nginx-conf.sh"
 ENV_LOCAL_TEMPLATE="$REPO_ROOT/.env.local.example"
 ENV_FILE_DEFAULT="$REPO_ROOT/.env"
 
@@ -252,6 +253,30 @@ EOF
 	chmod +x "$dir/sudo" "$dir/apt-get" "$dir/nginx" "$dir/systemctl" "$dir/envsubst"
 }
 
+create_repo_copy() {
+	local dest="$1"
+	mkdir -p "$dest/nginx/templates"
+
+	cp "$N8N_SCRIPT" "$dest/n8nite"
+	cp "$REPO_ROOT/check-env.sh" "$dest/check-env.sh"
+	cp "$REPO_ROOT/check-deps.sh" "$dest/check-deps.sh"
+	cp "$REPO_ROOT/docker-compose.yml" "$dest/docker-compose.yml"
+	cp "$REPO_ROOT/.env.example" "$dest/.env.example"
+	cp "$REPO_ROOT/.env.local.example" "$dest/.env.local.example"
+	cp "$REPO_ROOT/nginx/generate-nginx-conf.sh" "$dest/nginx/generate-nginx-conf.sh"
+	cp "$REPO_ROOT/nginx/install-nginx-and-deploy.sh" "$dest/nginx/install-nginx-and-deploy.sh"
+	cp "$REPO_ROOT/nginx/restore-nginx-conf.sh" "$dest/nginx/restore-nginx-conf.sh"
+	cp "$REPO_ROOT/nginx/templates/"* "$dest/nginx/templates/"
+
+	chmod +x \
+		"$dest/n8nite" \
+		"$dest/check-env.sh" \
+		"$dest/check-deps.sh" \
+		"$dest/nginx/generate-nginx-conf.sh" \
+		"$dest/nginx/install-nginx-and-deploy.sh" \
+		"$dest/nginx/restore-nginx-conf.sh"
+}
+
 check_requirements() {
 	printf '\n== Requirement checks ==\n'
 
@@ -328,9 +353,13 @@ functional_help_and_errors() {
 	if run_and_capture output "$N8N_SCRIPT" --help \
 		&& check_contains "$output" "n8nite :: opinionated n8n stack on wheels" \
 		&& check_contains "$output" "Unified entrypoint for this n8n stack." \
+		&& check_contains "$output" "env select PATH" \
 		&& check_contains "$output" "uninstall [args...]" \
+		&& check_contains "$output" "env restore [args...]" \
 		&& check_contains "$output" "env view [args...]" \
-		&& check_contains "$output" "env edit [args...]"; then
+		&& check_contains "$output" "env edit [args...]" \
+		&& ! check_contains "$output" "--env-file" \
+		&& check_contains "$output" "nginx restore [args...]"; then
 		pass "n8nite --help prints banner and usage"
 	else
 		fail "n8nite --help failed or banner/usage text changed"
@@ -364,12 +393,14 @@ functional_help_and_errors() {
 }
 
 functional_env_flow() {
-	local tmp_dir env_file output bad_env
+	local tmp_dir repo_dir env_file output
 	tmp_dir="$(mktemp -d)"
-	env_file="$tmp_dir/test.env"
-	bad_env="$tmp_dir/bad.env"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$env_file" env init local && [[ -f "$env_file" ]]; then
+	create_repo_copy "$repo_dir"
+
+	if run_and_capture output "$repo_dir/n8nite" env init local && [[ -f "$env_file" ]]; then
 		pass "env init local creates target env file"
 	else
 		fail "env init local failed"
@@ -381,13 +412,61 @@ functional_env_flow() {
 		fail "env init local content mismatch"
 	fi
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$env_file" env check --no-compose; then
+	if grep -Eq '^N8N_ENCRYPTION_KEY=[0-9a-f]{64}$' "$env_file" \
+		&& grep -Eq '^POSTGRES_PASSWORD=[0-9a-f]{64}$' "$env_file" \
+		&& grep -Eq '^POSTGRES_NON_ROOT_PASSWORD=[0-9a-f]{64}$' "$env_file"; then
+		pass "env init local generates secure key and passwords"
+	else
+		fail "env init local did not generate secure key/password values"
+	fi
+
+	if grep -q '^POSTGRES_USER=n8n_admin$' "$env_file" \
+		&& grep -q '^POSTGRES_NON_ROOT_USER=n8n_user$' "$env_file"; then
+		pass "env init local sets explicit postgres usernames"
+	else
+		fail "env init local did not set expected postgres usernames"
+	fi
+
+	if check_contains "$output" "Generating N8N_ENCRYPTION_KEY and PostgreSQL credentials" \
+		&& check_contains "$output" "Restore a prior env snapshot"; then
+		pass "env init local explains the generated-secret and restore flow"
+	else
+		fail "env init local did not explain the generated-secret flow"
+	fi
+
+	if run_and_capture output "$repo_dir/n8nite" env check --no-compose; then
 		pass "env check --no-compose succeeds for local template"
 	else
 		fail "env check --no-compose should pass for local template"
 	fi
 
-	cat >"$bad_env" <<'EOF'
+	if run_and_capture output "$repo_dir/n8nite" env init prod --force && [[ -f "$env_file" ]]; then
+		if grep -q '^POSTGRES_USER=n8n_admin$' "$env_file" \
+			&& grep -q '^POSTGRES_NON_ROOT_USER=n8n_user$' "$env_file" \
+			&& ! grep -q 'change_me_admin' "$env_file"; then
+			pass "env init prod replaces placeholder postgres users"
+		else
+			fail "env init prod left placeholder postgres users behind"
+		fi
+
+		if grep -Eq '^N8N_ENCRYPTION_KEY=[0-9a-f]{64}$' "$env_file" \
+			&& grep -Eq '^POSTGRES_PASSWORD=[0-9a-f]{64}$' "$env_file" \
+			&& grep -Eq '^POSTGRES_NON_ROOT_PASSWORD=[0-9a-f]{64}$' "$env_file"; then
+			pass "env init prod generates secure key and passwords"
+		else
+			fail "env init prod did not generate secure key/password values"
+		fi
+
+		if check_contains "$output" "Production init keeps your domain placeholders on purpose."; then
+			pass "env init prod explicitly explains the remaining domain edits"
+		else
+			fail "env init prod did not explain the remaining domain edits"
+		fi
+	else
+		fail "env init prod failed"
+	fi
+
+	cat >"$env_file" <<'EOF'
 N8N_HOST=localhost
 N8N_PROTOCOL=http
 WEBHOOK_URL=http://localhost:5678/
@@ -397,7 +476,7 @@ POSTGRES_DB=n8n
 POSTGRES_NON_ROOT_USER=n8n_user
 EOF
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$bad_env" env check --no-compose; then
+	if run_and_capture output "$repo_dir/n8nite" env check --no-compose; then
 		fail "env check should fail on missing required variable"
 	else
 		if check_contains "$output" "Missing required variable"; then
@@ -410,15 +489,112 @@ EOF
 	rm -rf "$tmp_dir"
 }
 
+functional_env_select() {
+	local tmp_dir repo_dir env_file source_env output backup_file
+	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
+	source_env="$tmp_dir/selected.env"
+
+	create_repo_copy "$repo_dir"
+	printf 'N8N_HOST=before-select\n' >"$env_file"
+	cat >"$source_env" <<'EOF'
+N8N_HOST=after-select
+N8N_PROTOCOL=http
+EOF
+
+	if run_and_capture output "$repo_dir/n8nite" env select "$source_env"; then
+		if grep -Fq 'N8N_HOST=after-select' "$env_file"; then
+			pass "env select copies the chosen file into repo .env"
+		else
+			fail "env select did not update repo .env content"
+		fi
+
+		backup_file="$(find "$repo_dir" -maxdepth 1 -type f -name '.env.bak.*' | head -n 1)"
+		if [[ -n "$backup_file" ]] && grep -Fq 'N8N_HOST=before-select' "$backup_file"; then
+			pass "env select preserves a timestamped backup of the previous .env"
+		else
+			fail "env select did not preserve the previous .env content"
+		fi
+
+		if check_contains "$output" "Copied selected env file into $env_file from $source_env" \
+			&& check_contains "$output" "Previous env snapshot preserved at"; then
+			pass "env select reports the copy target and backup path"
+		else
+			fail "env select did not report the copy result clearly"
+		fi
+	else
+		fail "env select failed"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
+functional_env_restore() {
+	local tmp_dir repo_dir env_file output backup_file backup_count
+	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
+
+	create_repo_copy "$repo_dir"
+	printf '# original-before-init\n' >"$env_file"
+
+	if run_and_capture output "$repo_dir/n8nite" env init local --force; then
+		backup_file="$(find "$repo_dir" -maxdepth 1 -type f -name '.env.bak.*' | head -n 1)"
+		if [[ -n "$backup_file" && "$backup_file" =~ \.env\.bak\.[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2} ]]; then
+			pass "env init force creates a readable timestamped backup"
+		else
+			fail "env init force did not create a readable timestamped backup"
+		fi
+
+		if [[ -n "$backup_file" ]] && grep -Fq '# original-before-init' "$backup_file"; then
+			pass "env init backup preserves the previous env content"
+		else
+			fail "env init backup did not preserve the previous env content"
+		fi
+	else
+		fail "env init local --force failed while preparing env restore test"
+		rm -rf "$tmp_dir"
+		return
+	fi
+
+	if run_and_capture output "$repo_dir/n8nite" env restore --latest --yes; then
+		if grep -Fq '# original-before-init' "$env_file"; then
+			pass "env restore --latest restores the newest env backup"
+		else
+			fail "env restore --latest did not restore the backup content"
+		fi
+
+		if check_contains "$output" "Using latest env backup:" \
+			&& check_contains "$output" "Current env file was backed up before restore:"; then
+			pass "env restore reports the selected backup and current-file snapshot"
+		else
+			fail "env restore did not report backup selection and current-file snapshot"
+		fi
+
+		backup_count="$(find "$repo_dir" -maxdepth 1 -type f -name '.env.bak.*' | wc -l | tr -d '[:space:]')"
+		if [[ "$backup_count" -ge 2 ]]; then
+			pass "env restore keeps a new backup of the replaced env file"
+		else
+			fail "env restore did not create a backup before overwriting the current env file"
+		fi
+	else
+		fail "env restore --latest failed"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
 functional_env_validation_matrix() {
-	local tmp_dir output protocol_env host_env placeholder_env
+	local tmp_dir repo_dir env_file output
 	local key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	tmp_dir="$(mktemp -d)"
-	protocol_env="$tmp_dir/protocol.env"
-	host_env="$tmp_dir/host.env"
-	placeholder_env="$tmp_dir/placeholder.env"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
 
-	cat >"$protocol_env" <<EOF
+	create_repo_copy "$repo_dir"
+
+	cat >"$env_file" <<EOF
 N8N_HOST=automation.test
 N8N_PROTOCOL=https
 WEBHOOK_URL=http://automation.test/
@@ -430,7 +606,7 @@ POSTGRES_NON_ROOT_USER=n8n_user
 POSTGRES_NON_ROOT_PASSWORD=n8n_user_pass
 EOF
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$protocol_env" env check --no-compose; then
+	if run_and_capture output "$repo_dir/n8nite" env check --no-compose; then
 		fail "env check should fail on protocol mismatch"
 	else
 		if check_contains "$output" "must match N8N_PROTOCOL"; then
@@ -440,7 +616,7 @@ EOF
 		fi
 	fi
 
-	cat >"$host_env" <<EOF
+	cat >"$env_file" <<EOF
 N8N_HOST=automation.test
 N8N_PROTOCOL=http
 WEBHOOK_URL=http://other.test/
@@ -452,7 +628,7 @@ POSTGRES_NON_ROOT_USER=n8n_user
 POSTGRES_NON_ROOT_PASSWORD=n8n_user_pass
 EOF
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$host_env" env check --no-compose; then
+	if run_and_capture output "$repo_dir/n8nite" env check --no-compose; then
 		fail "env check should fail on host mismatch"
 	else
 		if check_contains "$output" "must match N8N_HOST"; then
@@ -462,7 +638,7 @@ EOF
 		fi
 	fi
 
-	cat >"$placeholder_env" <<EOF
+	cat >"$env_file" <<EOF
 N8N_HOST=automation.test
 N8N_PROTOCOL=http
 WEBHOOK_URL=http://automation.test/
@@ -474,7 +650,7 @@ POSTGRES_NON_ROOT_USER=n8n_user
 POSTGRES_NON_ROOT_PASSWORD=n8n_user_pass
 EOF
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$placeholder_env" env check --no-compose; then
+	if run_and_capture output "$repo_dir/n8nite" env check --no-compose; then
 		fail "env check should fail on placeholder values"
 	else
 		if check_contains "$output" "still contains placeholder text"; then
@@ -488,13 +664,16 @@ EOF
 }
 
 functional_env_keygen() {
-	local output tmp_dir env_file old_key new_key
+	local output tmp_dir repo_dir env_file old_key new_key
 	tmp_dir="$(mktemp -d)"
-	env_file="$tmp_dir/local.env"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
+
+	create_repo_copy "$repo_dir"
 	cp "$ENV_LOCAL_TEMPLATE" "$env_file"
 	old_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_file" | cut -d= -f2- || true)"
 
-	if run_and_capture output "$N8N_SCRIPT" env keygen --plain; then
+	if run_and_capture output "$repo_dir/n8nite" env keygen --plain; then
 		if [[ "$output" =~ ^[0-9a-f]{64}$ ]]; then
 			pass "env keygen --plain outputs a 256-bit hex key"
 		else
@@ -504,7 +683,7 @@ functional_env_keygen() {
 		fail "env keygen --plain failed"
 	fi
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$env_file" env keygen --write --plain; then
+	if run_and_capture output "$repo_dir/n8nite" env keygen --write --plain; then
 		fail "env keygen --write should fail when key exists without --force"
 	else
 		if check_contains "$output" "already exists"; then
@@ -514,7 +693,7 @@ functional_env_keygen() {
 		fi
 	fi
 
-	if run_and_capture output "$N8N_SCRIPT" --env-file "$env_file" env keygen --write --force --plain; then
+	if run_and_capture output "$repo_dir/n8nite" env keygen --write --force --plain; then
 		new_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_file" | cut -d= -f2- || true)"
 		if [[ "$new_key" =~ ^[0-9a-f]{64}$ && "$new_key" != "$old_key" ]]; then
 			pass "env keygen --write --force updates env file key"
@@ -529,12 +708,15 @@ functional_env_keygen() {
 }
 
 functional_env_view_edit() {
-	local tmp_dir env_file output mock_bin vi_log nano_log
+	local tmp_dir repo_dir env_file output mock_bin vi_log nano_log
 	tmp_dir="$(mktemp -d)"
-	env_file="$tmp_dir/local.env"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
 	mock_bin="$tmp_dir/mock-bin"
 	vi_log="$tmp_dir/vi.log"
 	nano_log="$tmp_dir/nano.log"
+
+	create_repo_copy "$repo_dir"
 	cp "$ENV_LOCAL_TEMPLATE" "$env_file"
 	mkdir -p "$mock_bin"
 
@@ -570,7 +752,7 @@ EOF
 
 	chmod +x "$mock_bin/less" "$mock_bin/nano" "$mock_bin/vi"
 
-	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_LOG="$nano_log" "$N8N_SCRIPT" --env-file "$env_file" env view; then
+	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_LOG="$nano_log" "$repo_dir/n8nite" env view; then
 		if check_contains "$output" "N8N_HOST=localhost" && grep -Fq -- "-v $env_file" "$nano_log"; then
 			pass "env view uses nano -v when available"
 		else
@@ -580,7 +762,7 @@ EOF
 		fail "env view failed"
 	fi
 
-	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_LOG="$nano_log" "$N8N_SCRIPT" --env-file "$env_file" env edit; then
+	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_LOG="$nano_log" "$repo_dir/n8nite" env edit; then
 		if grep -Fq "# edited-by-mock-nano" "$env_file"; then
 			pass "env edit uses nano when available"
 		else
@@ -590,7 +772,7 @@ EOF
 		fail "env edit failed on nano path"
 	fi
 
-	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_FAIL=1 MOCK_VI_LOG="$vi_log" "$N8N_SCRIPT" --env-file "$env_file" env edit; then
+	if run_and_capture output env PATH="$mock_bin:$PATH" MOCK_NANO_FAIL=1 MOCK_VI_LOG="$vi_log" "$repo_dir/n8nite" env edit; then
 		if grep -Fq "syntax on" "$vi_log" && grep -Fq "set filetype=sh" "$vi_log"; then
 			pass "env edit falls back to vi with syntax commands when nano fails"
 		else
@@ -604,36 +786,28 @@ EOF
 }
 
 functional_deps_command() {
-	local output="" tmp_dir mock_ok mock_no_cert http_env https_env bad_env
+	local output="" tmp_dir repo_dir env_file mock_ok mock_no_cert
 	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
 	mock_ok="$tmp_dir/mock-ok"
 	mock_no_cert="$tmp_dir/mock-no-cert"
-	http_env="$tmp_dir/http.env"
-	https_env="$tmp_dir/https.env"
-	bad_env="$tmp_dir/bad.env"
 
+	create_repo_copy "$repo_dir"
 	create_deps_mock_bin "$mock_ok" 1 "ok"
 	create_deps_mock_bin "$mock_no_cert" 0 "ok"
 
-	cat >"$http_env" <<'EOF'
+	cat >"$env_file" <<'EOF'
 N8N_PROTOCOL=http
 EOF
 
-	cat >"$https_env" <<'EOF'
-N8N_PROTOCOL=https
-EOF
-
-	cat >"$bad_env" <<'EOF'
-N8N_PROTOCOL=invalid
-EOF
-
-	if run_and_capture output "$N8N_SCRIPT" deps check --help && check_contains "$output" "Check system dependencies"; then
+	if run_and_capture output "$repo_dir/n8nite" deps check --help && check_contains "$output" "Check system dependencies"; then
 		pass "n8nite deps check --help works"
 	else
 		fail "n8nite deps check --help failed or usage text changed"
 	fi
 
-	if run_and_capture output env PATH="$mock_ok" USER=tester "$N8N_SCRIPT" --env-file "$http_env" deps check; then
+	if run_and_capture output env PATH="$mock_ok" USER=tester "$repo_dir/n8nite" deps check; then
 		if check_contains "$output" "profile: nginx-http"; then
 			pass "deps check auto profile resolves to nginx-http for N8N_PROTOCOL=http"
 		else
@@ -643,7 +817,11 @@ EOF
 		fail "deps check auto profile failed for N8N_PROTOCOL=http"
 	fi
 
-	if run_and_capture output env PATH="$mock_ok" USER=tester "$N8N_SCRIPT" --env-file "$https_env" deps check; then
+	cat >"$env_file" <<'EOF'
+N8N_PROTOCOL=https
+EOF
+
+	if run_and_capture output env PATH="$mock_ok" USER=tester "$repo_dir/n8nite" deps check; then
 		if check_contains "$output" "profile: nginx-https"; then
 			pass "deps check auto profile resolves to nginx-https for N8N_PROTOCOL=https"
 		else
@@ -653,7 +831,11 @@ EOF
 		fail "deps check auto profile failed for N8N_PROTOCOL=https"
 	fi
 
-	if run_and_capture output env PATH="$mock_ok" USER=tester "$N8N_SCRIPT" --env-file "$bad_env" deps check; then
+	cat >"$env_file" <<'EOF'
+N8N_PROTOCOL=invalid
+EOF
+
+	if run_and_capture output env PATH="$mock_ok" USER=tester "$repo_dir/n8nite" deps check; then
 		if check_contains "$output" "profile: core"; then
 			pass "deps check auto profile falls back to core for invalid protocol"
 		else
@@ -663,7 +845,11 @@ EOF
 		fail "deps check auto fallback failed for invalid protocol"
 	fi
 
-	if run_and_capture output env PATH="$mock_no_cert" USER=tester "$N8N_SCRIPT" --env-file "$https_env" deps check --profile nginx-https; then
+	cat >"$env_file" <<'EOF'
+N8N_PROTOCOL=https
+EOF
+
+	if run_and_capture output env PATH="$mock_no_cert" USER=tester "$repo_dir/n8nite" deps check --profile nginx-https; then
 		fail "deps check nginx-https should fail when certbot is missing"
 	else
 		if check_contains "$output" "certbot is installed"; then
@@ -781,15 +967,13 @@ functional_symlink_repo_resolution() {
 	tmp_dir="$(mktemp -d)"
 	repo_dir="$tmp_dir/repo"
 	bin_dir="$tmp_dir/bin"
-	env_file="$tmp_dir/local.env"
+	env_file="$repo_dir/.env"
 
-	mkdir -p "$repo_dir" "$bin_dir"
-	cp "$N8N_SCRIPT" "$repo_dir/n8nite"
-	cp "$ENV_LOCAL_TEMPLATE" "$repo_dir/.env.local.example"
-	chmod +x "$repo_dir/n8nite"
+	create_repo_copy "$repo_dir"
+	mkdir -p "$bin_dir"
 	ln -s "$repo_dir/n8nite" "$bin_dir/n8nite"
 
-	if run_and_capture output "$bin_dir/n8nite" --env-file "$env_file" env init local; then
+	if run_and_capture output "$bin_dir/n8nite" env init local; then
 		if [[ -f "$env_file" ]]; then
 			pass "n8nite resolves repo root correctly when invoked via symlink"
 		else
@@ -836,13 +1020,10 @@ functional_uninstall_command() {
 }
 
 functional_nginx_generate() {
-	local tmp_dir env_file out_dir mock_bin output
+	local tmp_dir out_dir mock_bin output
 	tmp_dir="$(mktemp -d)"
-	env_file="$tmp_dir/local.env"
 	out_dir="$tmp_dir/out"
 	mock_bin="$tmp_dir/mock-bin"
-
-	cp "$ENV_LOCAL_TEMPLATE" "$env_file"
 	mkdir -p "$mock_bin"
 
 	# Keep this test independent from host gettext installation.
@@ -853,7 +1034,7 @@ EOF
 	chmod +x "$mock_bin/envsubst"
 
 	set +e
-	output="$(PATH="$mock_bin:$PATH" "$N8N_SCRIPT" --env-file "$env_file" nginx generate --mode http --server-name localhost --out-dir "$out_dir" 2>&1)"
+	output="$(PATH="$mock_bin:$PATH" "$N8N_SCRIPT" nginx generate --mode http --server-name localhost --out-dir "$out_dir" 2>&1)"
 	local rc=$?
 	set -e
 
@@ -873,20 +1054,22 @@ EOF
 }
 
 functional_nginx_deploy_sandboxed() {
-	local output="" tmp_dir mock_bin env_file sites_avail sites_enabled
-	local apt_log sudo_log systemctl_log backup_count_before backup_count_after
+	local output="" tmp_dir repo_dir mock_bin env_file sites_avail sites_enabled
+	local apt_log sudo_log systemctl_log backup_count_before backup_count_after backup_file
 	local conf_name="automation-test"
 	local key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
 	mock_bin="$tmp_dir/mock-bin"
-	env_file="$tmp_dir/http.env"
+	env_file="$repo_dir/.env"
 	sites_avail="$tmp_dir/sites-available"
 	sites_enabled="$tmp_dir/sites-enabled"
 	apt_log="$tmp_dir/apt.log"
 	sudo_log="$tmp_dir/sudo.log"
 	systemctl_log="$tmp_dir/systemctl.log"
 
+	create_repo_copy "$repo_dir"
 	create_nginx_deploy_mock_bin "$mock_bin"
 
 	cat >"$env_file" <<EOF
@@ -904,12 +1087,12 @@ EOF
 	if run_and_capture output \
 		env \
 		PATH="$mock_bin:$PATH" \
-		MOCK_APT_LOG="$apt_log" \
-		MOCK_SUDO_LOG="$sudo_log" \
-		MOCK_SYSTEMCTL_LOG="$systemctl_log" \
-		SITES_AVAILABLE_DIR="$sites_avail" \
-		SITES_ENABLED_DIR="$sites_enabled" \
-		bash -c "printf 'y\n' | \"$NGINX_DEPLOY_SCRIPT\" --env-file \"$env_file\""; then
+			MOCK_APT_LOG="$apt_log" \
+			MOCK_SUDO_LOG="$sudo_log" \
+			MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+			SITES_AVAILABLE_DIR="$sites_avail" \
+			SITES_ENABLED_DIR="$sites_enabled" \
+			bash -c "printf 'y\n' | \"$repo_dir/nginx/install-nginx-and-deploy.sh\" --env-file \"$env_file\""; then
 		pass "nginx deploy runs successfully in sandboxed temp dirs"
 	else
 		fail "nginx deploy sandboxed run failed"
@@ -951,12 +1134,12 @@ EOF
 	if run_and_capture output \
 		env \
 		PATH="$mock_bin:$PATH" \
-		MOCK_APT_LOG="$apt_log" \
-		MOCK_SUDO_LOG="$sudo_log" \
-		MOCK_SYSTEMCTL_LOG="$systemctl_log" \
-		SITES_AVAILABLE_DIR="$sites_avail" \
-		SITES_ENABLED_DIR="$sites_enabled" \
-		bash -c "printf 'y\n' | \"$NGINX_DEPLOY_SCRIPT\" --env-file \"$env_file\""; then
+			MOCK_APT_LOG="$apt_log" \
+			MOCK_SUDO_LOG="$sudo_log" \
+			MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+			SITES_AVAILABLE_DIR="$sites_avail" \
+			SITES_ENABLED_DIR="$sites_enabled" \
+			bash -c "printf 'y\n' | \"$repo_dir/nginx/install-nginx-and-deploy.sh\" --env-file \"$env_file\""; then
 		pass "nginx deploy second run succeeds in sandboxed temp dirs"
 	else
 		fail "nginx deploy second sandboxed run failed"
@@ -971,10 +1154,44 @@ EOF
 		fail "nginx deploy did not create backup before overwrite on rerun"
 	fi
 
+	backup_file="$(find "$sites_avail" -maxdepth 1 -type f -name "${conf_name}.conf.bak.*" | sort -r | head -n 1)"
+	if [[ -n "$backup_file" && "$backup_file" =~ ${conf_name}\.conf\.bak\.[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2} ]]; then
+		pass "nginx deploy backup names use readable timestamps"
+	else
+		fail "nginx deploy backup name is not using the readable timestamp format"
+	fi
+
 	if grep -Fq "${sites_avail}/${conf_name}.conf.bak." "$sudo_log"; then
 		pass "nginx deploy backup copy operation stays within sandbox paths"
 	else
 		fail "nginx deploy backup operation not observed in sandbox sudo log"
+	fi
+
+	printf 'manually changed config\n' >"$sites_avail/$conf_name.conf"
+
+	if run_and_capture output \
+		env \
+		PATH="$mock_bin:$PATH" \
+			MOCK_APT_LOG="$apt_log" \
+			MOCK_SUDO_LOG="$sudo_log" \
+			MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+			SITES_AVAILABLE_DIR="$sites_avail" \
+			SITES_ENABLED_DIR="$sites_enabled" \
+			"$repo_dir/n8nite" nginx restore --conf-name "$conf_name" --latest --yes; then
+		if [[ -n "$backup_file" ]] && cmp -s "$backup_file" "$sites_avail/$conf_name.conf"; then
+			pass "nginx restore --latest restores the newest backup content"
+		else
+			fail "nginx restore --latest did not restore the backup content"
+		fi
+
+		if check_contains "$output" "Using latest nginx backup:" \
+			&& check_contains "$output" "Success. Restored"; then
+			pass "nginx restore reports the selected backup and restore result"
+		else
+			fail "nginx restore did not report the selected backup and restore result"
+		fi
+	else
+		fail "nginx restore --latest failed in sandboxed temp dirs"
 	fi
 
 	rm -rf "$tmp_dir"
@@ -1003,7 +1220,7 @@ functional_interactive_nginx_defaults() {
 	tmp_dir="$(mktemp -d)"
 	repo_dir="$tmp_dir/repo"
 	mock_bin="$tmp_dir/mock-bin"
-	env_file="$tmp_dir/http.env"
+	env_file="$repo_dir/.env"
 	sites_avail="$tmp_dir/sites-available"
 	sites_enabled="$tmp_dir/sites-enabled"
 	apt_log="$tmp_dir/apt.log"
@@ -1012,14 +1229,7 @@ functional_interactive_nginx_defaults() {
 	generated_conf="$repo_dir/nginx/generated/automation.test.http.conf"
 	deployed_conf="$sites_avail/automation-test.conf"
 
-	mkdir -p "$repo_dir/nginx/templates"
-	cp "$N8N_SCRIPT" "$repo_dir/n8nite"
-	cp "$REPO_ROOT/check-env.sh" "$repo_dir/check-env.sh"
-	cp "$REPO_ROOT/nginx/generate-nginx-conf.sh" "$repo_dir/nginx/generate-nginx-conf.sh"
-	cp "$REPO_ROOT/nginx/install-nginx-and-deploy.sh" "$repo_dir/nginx/install-nginx-and-deploy.sh"
-	cp "$REPO_ROOT/nginx/templates/"* "$repo_dir/nginx/templates/"
-	chmod +x "$repo_dir/n8nite" "$repo_dir/check-env.sh" "$repo_dir/nginx/generate-nginx-conf.sh" "$repo_dir/nginx/install-nginx-and-deploy.sh"
-
+	create_repo_copy "$repo_dir"
 	create_nginx_deploy_mock_bin "$mock_bin"
 
 	cat >"$env_file" <<EOF
@@ -1034,7 +1244,7 @@ POSTGRES_NON_ROOT_USER=n8n_user
 POSTGRES_NON_ROOT_PASSWORD=n8n_user_pass
 EOF
 
-	if run_and_capture output env PATH="$mock_bin:$PATH" bash -c "printf '13\n0\n' | \"$repo_dir/n8nite\" --env-file \"$env_file\" interactive"; then
+	if run_and_capture output env PATH="$mock_bin:$PATH" bash -c "printf '13\n0\n' | \"$repo_dir/n8nite\" interactive"; then
 		if [[ -f "$generated_conf" ]]; then
 			pass "interactive nginx generate uses env defaults without extra prompts"
 		else
@@ -1055,12 +1265,12 @@ EOF
 	if run_and_capture output \
 		env \
 		PATH="$mock_bin:$PATH" \
-		MOCK_APT_LOG="$apt_log" \
-		MOCK_SUDO_LOG="$sudo_log" \
-		MOCK_SYSTEMCTL_LOG="$systemctl_log" \
-		SITES_AVAILABLE_DIR="$sites_avail" \
-		SITES_ENABLED_DIR="$sites_enabled" \
-		bash -c "printf '14\ny\n0\n' | \"$repo_dir/n8nite\" --env-file \"$env_file\" interactive"; then
+			MOCK_APT_LOG="$apt_log" \
+			MOCK_SUDO_LOG="$sudo_log" \
+			MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+			SITES_AVAILABLE_DIR="$sites_avail" \
+			SITES_ENABLED_DIR="$sites_enabled" \
+			bash -c "printf '14\ny\n0\n' | \"$repo_dir/n8nite\" interactive"; then
 		if [[ -f "$deployed_conf" ]]; then
 			pass "interactive nginx deploy uses detected defaults without extra prompts"
 		else
@@ -1081,15 +1291,15 @@ EOF
 
 functional_interactive_prompt_minimization() {
 	if grep -Fq 'Overwrite target file $target?' "$N8N_SCRIPT"; then
-		pass "interactive env init overwrite prompt includes detected target path"
+		fail "interactive env init still references the old target-path prompt"
 	else
-		fail "interactive env init overwrite prompt did not include detected target path"
+		pass "interactive env init no longer references the old target-path prompt"
 	fi
 
-	if grep -Fq 'Overwrite target file?' "$N8N_SCRIPT"; then
-		fail "interactive env init still uses generic overwrite prompt"
+	if grep -Fq 'Overwrite current .env file ($ENV_FILE)?' "$N8N_SCRIPT"; then
+		pass "interactive env init overwrite prompt is tied to the repo .env path"
 	else
-		pass "interactive env init no longer uses generic overwrite prompt"
+		fail "interactive env init overwrite prompt did not switch to the repo .env path"
 	fi
 
 	if grep -Fq 'Certbot email (optional)' "$N8N_SCRIPT"; then
@@ -1124,19 +1334,17 @@ functional_interactive_prompt_minimization() {
 }
 
 functional_interactive_keygen_prompt() {
-	local tmp_dir env_with_key env_without_key output existing_key retained_key
+	local tmp_dir repo_dir env_file output existing_key retained_key
 	tmp_dir="$(mktemp -d)"
-	env_with_key="$tmp_dir/with-key.env"
-	env_without_key="$tmp_dir/without-key.env"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
 
-	cp "$ENV_LOCAL_TEMPLATE" "$env_with_key"
-	existing_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_with_key" | cut -d= -f2- || true)"
-	cat >"$env_without_key" <<'EOF'
-N8N_HOST=localhost
-EOF
+	create_repo_copy "$repo_dir"
+	cp "$ENV_LOCAL_TEMPLATE" "$env_file"
+	existing_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_file" | cut -d= -f2- || true)"
 
-	if run_and_capture output bash -c "printf '5\ny\nn\n0\n' | \"$N8N_SCRIPT\" --env-file \"$env_with_key\" interactive"; then
-		retained_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_with_key" | cut -d= -f2- || true)"
+	if run_and_capture output bash -c "printf '5\ny\nn\n0\n' | \"$repo_dir/n8nite\" interactive"; then
+		retained_key="$(grep '^N8N_ENCRYPTION_KEY=' "$env_file" | cut -d= -f2- || true)"
 		if grep -Fq 'Replace existing key in $ENV_FILE?' "$N8N_SCRIPT"; then
 			pass "interactive keygen prompt text is tied to the detected env path"
 		else
@@ -1160,14 +1368,18 @@ EOF
 		return
 	fi
 
-	if run_and_capture output bash -c "printf '5\ny\n0\n' | \"$N8N_SCRIPT\" --env-file \"$env_without_key\" interactive"; then
+	cat >"$env_file" <<'EOF'
+N8N_HOST=localhost
+EOF
+
+	if run_and_capture output bash -c "printf '5\ny\n0\n' | \"$repo_dir/n8nite\" interactive"; then
 		if check_contains "$output" "Replace existing key"; then
 			fail "interactive keygen prompted for replacement even though no key existed"
 		else
 			pass "interactive keygen skips replacement prompt when env file has no key"
 		fi
 
-		if grep -Eq '^N8N_ENCRYPTION_KEY=[0-9a-f]{64}$' "$env_without_key"; then
+		if grep -Eq '^N8N_ENCRYPTION_KEY=[0-9a-f]{64}$' "$env_file"; then
 			pass "interactive keygen writes a generated key when env file has no existing key"
 		else
 			fail "interactive keygen did not write a generated key for env file without one"
@@ -1188,12 +1400,14 @@ functional_queue_services_declared() {
 }
 
 functional_compose_delegation() {
-	local tmp_dir env_file mock_bin docker_log output
+	local tmp_dir repo_dir env_file mock_bin docker_log output
 	tmp_dir="$(mktemp -d)"
-	env_file="$tmp_dir/local.env"
+	repo_dir="$tmp_dir/repo"
+	env_file="$repo_dir/.env"
 	mock_bin="$tmp_dir/mock-bin"
 	docker_log="$tmp_dir/docker.log"
 
+	create_repo_copy "$repo_dir"
 	cp "$ENV_LOCAL_TEMPLATE" "$env_file"
 	mkdir -p "$mock_bin"
 
@@ -1207,17 +1421,17 @@ EOF
 	chmod +x "$mock_bin/docker"
 
 	set +e
-	output="$(PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$docker_log" "$N8N_SCRIPT" --env-file "$env_file" config 2>&1)"
+	output="$(PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$docker_log" "$repo_dir/n8nite" config 2>&1)"
 	local rc_config=$?
 	set -e
 
 	if [[ "$rc_config" -ne 0 ]]; then
 		fail "n8nite config failed under mock docker"
 		rm -rf "$tmp_dir"
-		return
-	fi
+			return
+		fi
 
-	if grep -Fq "compose --env-file $env_file -f $REPO_ROOT/docker-compose.yml config" "$docker_log"; then
+	if grep -Fq "compose --env-file $env_file -f $repo_dir/docker-compose.yml config" "$docker_log"; then
 		pass "n8nite config delegates to docker compose with expected args"
 	else
 		fail "n8nite config did not call docker compose as expected"
@@ -1226,23 +1440,23 @@ EOF
 	: >"$docker_log"
 
 	set +e
-	output="$(PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$docker_log" "$N8N_SCRIPT" --env-file "$env_file" up 2>&1)"
+	output="$(PATH="$mock_bin:$PATH" MOCK_DOCKER_LOG="$docker_log" "$repo_dir/n8nite" up 2>&1)"
 	local rc_up=$?
 	set -e
 
 	if [[ "$rc_up" -ne 0 ]]; then
 		fail "n8nite up failed under mock docker"
 		rm -rf "$tmp_dir"
-		return
-	fi
+			return
+		fi
 
-	if grep -Fq "compose --env-file $env_file -f $REPO_ROOT/docker-compose.yml config" "$docker_log"; then
+	if grep -Fq "compose --env-file $env_file -f $repo_dir/docker-compose.yml config" "$docker_log"; then
 		pass "n8nite up runs env compose validation"
 	else
 		fail "n8nite up did not trigger compose validation through env check"
 	fi
 
-	if grep -Fq "compose --env-file $env_file -f $REPO_ROOT/docker-compose.yml up -d" "$docker_log"; then
+	if grep -Fq "compose --env-file $env_file -f $repo_dir/docker-compose.yml up -d" "$docker_log"; then
 		pass "n8nite up delegates to docker compose up -d"
 	else
 		fail "n8nite up did not call docker compose up -d"
@@ -1265,9 +1479,15 @@ check_functional() {
 		fail "nginx/install-nginx-and-deploy.sh is missing or not executable"
 		return
 	}
+	[[ -x "$NGINX_RESTORE_SCRIPT" ]] || {
+		fail "nginx/restore-nginx-conf.sh is missing or not executable"
+		return
+	}
 
 	functional_help_and_errors
 	functional_env_flow
+	functional_env_select
+	functional_env_restore
 	functional_env_validation_matrix
 	functional_env_keygen
 	functional_env_view_edit
