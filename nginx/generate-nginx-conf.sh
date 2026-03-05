@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOF'
-Generate n8n nginx config files from envsubst templates.
+Generate n8n nginx config files from templates.
 
 Usage:
   ./nginx/generate-nginx-conf.sh --mode|-m http|https|both --server-name|-s DOMAIN [options]
@@ -45,6 +45,28 @@ EOF
 }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+escape_sed_replacement() {
+	printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+render_template_file() {
+	local template_file="$1"
+	local output_file="$2"
+	shift 2
+	local sed_args=()
+	local key="" value="" escaped_value=""
+
+	while (($# > 0)); do
+		key="$1"
+		value="$2"
+		shift 2
+		escaped_value="$(escape_sed_replacement "$value")"
+		sed_args+=(-e "s|\${${key}}|${escaped_value}|g")
+	done
+
+	sed "${sed_args[@]}" "$template_file" >"$output_file"
+}
 
 mode=""
 mode="${MODE:-https}"
@@ -135,37 +157,33 @@ if [[ ! -f "$http_template" || ! -f "$https_template" ]]; then
 	exit 1
 fi
 
-if ! command -v envsubst >/dev/null 2>&1; then
-	echo "envsubst is required but not found. Install gettext/gettext-base first." >&2
-	exit 1
-fi
-
 mkdir -p "$out_dir"
 
 render_template() {
 	local template_file="$1"
 	local output_file="$2"
-	local variables="$3"
-	SERVER_NAME="$server_name" \
-	UPSTREAM="$upstream" \
-	SSL_CERT="$ssl_cert" \
-	SSL_KEY="$ssl_key" \
-	CERTBOT_SSL_OPTIONS="$certbot_ssl_options" \
-	CERTBOT_DHPARAM="$certbot_dhparam" \
-		envsubst "$variables" <"$template_file" >"$output_file"
+	render_template_file \
+		"$template_file" \
+		"$output_file" \
+		SERVER_NAME "$server_name" \
+		UPSTREAM "$upstream" \
+		SSL_CERT "$ssl_cert" \
+		SSL_KEY "$ssl_key" \
+		CERTBOT_SSL_OPTIONS "$certbot_ssl_options" \
+		CERTBOT_DHPARAM "$certbot_dhparam"
 }
 
 generated_files=()
 
 if [[ "$mode" == "http" || "$mode" == "both" ]]; then
 	http_out="$out_dir/${server_name}.http.conf"
-	render_template "$http_template" "$http_out" '${SERVER_NAME} ${UPSTREAM}'
+	render_template "$http_template" "$http_out"
 	generated_files+=("$http_out")
 fi
 
 if [[ "$mode" == "https" || "$mode" == "both" ]]; then
 	https_out="$out_dir/${server_name}.https.conf"
-	render_template "$https_template" "$https_out" '${SERVER_NAME} ${UPSTREAM} ${SSL_CERT} ${SSL_KEY} ${CERTBOT_SSL_OPTIONS} ${CERTBOT_DHPARAM}'
+	render_template "$https_template" "$https_out"
 	generated_files+=("$https_out")
 fi
 

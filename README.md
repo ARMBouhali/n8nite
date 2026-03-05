@@ -115,8 +115,7 @@ Minimum:
 For Nginx deployment commands:
 
 - 🌐 Nginx
-- 🔤 `envsubst` (gettext/gettext-base)
-- 🔐 Certbot (only for HTTPS certificate issuance)
+- 🔐 Certbot (only for HTTPS certificate issuance; snap install recommended)
 
 You can check your system with:
 
@@ -128,7 +127,7 @@ You can check your system with:
 Dependency profiles:
 
 - `core`: docker + compose + group + daemon
-- `nginx-http`: `core` + `nginx` + `envsubst` + `sudo` + `systemctl`
+- `nginx-http`: `core` + `nginx` + `sudo` + `systemctl`
 - `nginx-https`: `nginx-http` + `certbot`
 - `auto`: picks `nginx-http` or `nginx-https` from `.env` `N8N_PROTOCOL` (falls back to `core` if `.env` is missing)
 
@@ -323,8 +322,8 @@ Generated files are written to `./nginx/generated/` by default.
 The deploy flow is fail-fast (`set -euo pipefail`) and includes:
 
 1. ✅ env validation
-2. 📦 dependency install (nginx/gettext, certbot for HTTPS)
-3. 🔐 certificate check/creation for HTTPS
+2. 📦 nginx install prompt when nginx is missing
+3. 🔐 certificate check/creation for HTTPS (suggests snap-installed certbot when missing)
 4. 📝 config generation + review prompt
 5. 💾 existing nginx conf backup (`YYYY-MM-DD_HH-MM-SS`) if target exists
 6. 🧪 nginx validation + restart

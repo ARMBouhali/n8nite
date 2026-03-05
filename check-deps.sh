@@ -16,7 +16,7 @@ Options:
 
 Profiles:
   core        docker, docker compose, docker group, docker daemon
-  nginx-http  core + nginx + envsubst + sudo + systemctl
+  nginx-http  core + nginx + sudo + systemctl
   nginx-https nginx-http + certbot
   all         same as nginx-https
   auto        infer from N8N_PROTOCOL in env file:
@@ -212,10 +212,6 @@ check_nginx_http() {
 		nginx \
 		"nginx is installed" \
 		"sudo apt-get update && sudo apt-get install -y nginx | docs: https://nginx.org/en/linux_packages.html"
-	check_command \
-		envsubst \
-		"envsubst is installed (gettext/gettext-base)" \
-		"sudo apt-get update && sudo apt-get install -y gettext-base"
 	check_sudo
 	check_command \
 		systemctl \
@@ -228,7 +224,7 @@ check_nginx_https() {
 	check_command \
 		certbot \
 		"certbot is installed (required for HTTPS certificate flow)" \
-		"sudo apt-get update && sudo apt-get install -y certbot python3-certbot-nginx"
+		"Install with snap (recommended): sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot"
 }
 
 while (($# > 0)); do

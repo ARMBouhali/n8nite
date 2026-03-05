@@ -20,7 +20,6 @@ What it checks:
      - current user in docker group
      - docker daemon reachable
      - nginx installed
-     - envsubst installed
      - certbot installed when .env protocol is https
   2) n8nite behavior:
      - help/unknown command handling
@@ -148,11 +147,6 @@ EOF
 exit 0
 EOF
 
-	cat >"$dir/envsubst" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-
 	cat >"$dir/sudo" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -170,7 +164,7 @@ exit 0
 EOF
 	fi
 
-	chmod +x "$dir/docker" "$dir/id" "$dir/nginx" "$dir/envsubst" "$dir/sudo" "$dir/systemctl"
+	chmod +x "$dir/docker" "$dir/id" "$dir/nginx" "$dir/sudo" "$dir/systemctl"
 	if [[ "$include_certbot" -eq 1 ]]; then
 		chmod +x "$dir/certbot"
 	fi
@@ -207,6 +201,7 @@ EOF
 
 create_nginx_deploy_mock_bin() {
 	local dir="$1"
+	local include_nginx="${2:-1}"
 	mkdir -p "$dir"
 
 	cat >"$dir/sudo" <<'EOF'
@@ -224,10 +219,23 @@ set -euo pipefail
 if [[ -n "${MOCK_APT_LOG:-}" ]]; then
 	printf '%s\n' "$*" >>"$MOCK_APT_LOG"
 fi
+bin_dir="$(cd "$(dirname "$0")" && pwd)"
+if [[ " $* " == *" nginx "* ]] && [[ ! -x "$bin_dir/nginx" ]]; then
+	cat >"$bin_dir/nginx" <<'INNER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-t" ]]; then
+	exit 0
+fi
+exit 0
+INNER
+	chmod +x "$bin_dir/nginx"
+fi
 exit 0
 EOF
 
-	cat >"$dir/nginx" <<'EOF'
+	if [[ "$include_nginx" -eq 1 ]]; then
+		cat >"$dir/nginx" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "-t" ]]; then
@@ -235,6 +243,7 @@ if [[ "${1:-}" == "-t" ]]; then
 fi
 exit 0
 EOF
+	fi
 
 	cat >"$dir/systemctl" <<'EOF'
 #!/usr/bin/env bash
@@ -245,12 +254,32 @@ fi
 exit 0
 EOF
 
-	cat >"$dir/envsubst" <<'EOF'
-#!/usr/bin/env bash
-cat
-EOF
+	chmod +x "$dir/sudo" "$dir/apt-get" "$dir/systemctl"
+	if [[ "$include_nginx" -eq 1 ]]; then
+		chmod +x "$dir/nginx"
+	fi
 
-	chmod +x "$dir/sudo" "$dir/apt-get" "$dir/nginx" "$dir/systemctl" "$dir/envsubst"
+	ln -sf "$(command -v bash)" "$dir/bash"
+	ln -sf "$(command -v env)" "$dir/env"
+	ln -sf "$(command -v dirname)" "$dir/dirname"
+	ln -sf "$(command -v awk)" "$dir/awk"
+	ln -sf "$(command -v grep)" "$dir/grep"
+	ln -sf "$(command -v tr)" "$dir/tr"
+	ln -sf "$(command -v sed)" "$dir/sed"
+	ln -sf "$(command -v mktemp)" "$dir/mktemp"
+	ln -sf "$(command -v cat)" "$dir/cat"
+	ln -sf "$(command -v cp)" "$dir/cp"
+	ln -sf "$(command -v chmod)" "$dir/chmod"
+	ln -sf "$(command -v mkdir)" "$dir/mkdir"
+	ln -sf "$(command -v ln)" "$dir/ln"
+	ln -sf "$(command -v date)" "$dir/date"
+	ln -sf "$(command -v sort)" "$dir/sort"
+	ln -sf "$(command -v head)" "$dir/head"
+	ln -sf "$(command -v find)" "$dir/find"
+	ln -sf "$(command -v rm)" "$dir/rm"
+	ln -sf "$(command -v mv)" "$dir/mv"
+	ln -sf "$(command -v basename)" "$dir/basename"
+	ln -sf "$(command -v test)" "$dir/test"
 }
 
 create_repo_copy() {
@@ -320,23 +349,15 @@ check_requirements() {
 			"sudo apt-get update && sudo apt-get install -y nginx | docs: https://nginx.org/en/linux_packages.html"
 	fi
 
-	if command -v envsubst >/dev/null 2>&1; then
-		pass "envsubst is installed"
-	else
-		fail \
-			"envsubst is not installed" \
-			"sudo apt-get update && sudo apt-get install -y gettext-base"
-	fi
-
 	case "$(resolve_protocol_for_requirement_check)" in
 		https)
 			if command -v certbot >/dev/null 2>&1; then
 				pass "certbot is installed for https profile"
-			else
-				fail \
-					"certbot is not installed (N8N_PROTOCOL=https in .env)" \
-					"sudo apt-get update && sudo apt-get install -y certbot python3-certbot-nginx | docs: https://certbot.eff.org/"
-			fi
+				else
+					fail \
+						"certbot is not installed (N8N_PROTOCOL=https in .env)" \
+						"Install with snap (recommended): sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot | docs: https://certbot.eff.org/"
+				fi
 			;;
 		http)
 			pass "certbot check skipped (.env uses N8N_PROTOCOL=http)"
@@ -1026,13 +1047,6 @@ functional_nginx_generate() {
 	mock_bin="$tmp_dir/mock-bin"
 	mkdir -p "$mock_bin"
 
-	# Keep this test independent from host gettext installation.
-	cat >"$mock_bin/envsubst" <<'EOF'
-#!/usr/bin/env bash
-cat
-EOF
-	chmod +x "$mock_bin/envsubst"
-
 	set +e
 	output="$(PATH="$mock_bin:$PATH" "$N8N_SCRIPT" nginx generate --mode http --server-name localhost --out-dir "$out_dir" 2>&1)"
 	local rc=$?
@@ -1048,6 +1062,81 @@ EOF
 		pass "n8nite nginx generate produces output file"
 	else
 		fail "n8nite nginx generate did not create expected file"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
+functional_nginx_deploy_missing_nginx_prompt() {
+	local output="" tmp_dir repo_dir mock_bin env_file sites_avail sites_enabled
+	local apt_log sudo_log systemctl_log
+	local key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
+	mock_bin="$tmp_dir/mock-bin"
+	env_file="$repo_dir/.env"
+	sites_avail="$tmp_dir/sites-available"
+	sites_enabled="$tmp_dir/sites-enabled"
+	apt_log="$tmp_dir/apt.log"
+	sudo_log="$tmp_dir/sudo.log"
+	systemctl_log="$tmp_dir/systemctl.log"
+
+	create_repo_copy "$repo_dir"
+	create_nginx_deploy_mock_bin "$mock_bin" 0
+
+	cat >"$env_file" <<EOF
+N8N_HOST=automation.test
+N8N_PROTOCOL=http
+WEBHOOK_URL=http://automation.test/
+N8N_ENCRYPTION_KEY=$key
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=admin_pass
+POSTGRES_DB=n8n
+POSTGRES_NON_ROOT_USER=n8n_user
+POSTGRES_NON_ROOT_PASSWORD=n8n_user_pass
+EOF
+
+	if run_and_capture output \
+		env \
+		PATH="$mock_bin" \
+			MOCK_APT_LOG="$apt_log" \
+			MOCK_SUDO_LOG="$sudo_log" \
+			MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+			SITES_AVAILABLE_DIR="$sites_avail" \
+			SITES_ENABLED_DIR="$sites_enabled" \
+			bash -c "printf 'n\n' | \"$repo_dir/nginx/install-nginx-and-deploy.sh\" --env-file \"$env_file\""; then
+		fail "nginx deploy should stop when nginx installation is declined"
+		rm -rf "$tmp_dir"
+		return
+	else
+		if check_contains "$output" "nginx is required for deployment" && [[ ! -s "$apt_log" ]]; then
+			pass "nginx deploy aborts when nginx installation is declined"
+		else
+			fail "nginx deploy did not stop cleanly when nginx installation was declined"
+			rm -rf "$tmp_dir"
+			return
+		fi
+	fi
+
+	if run_and_capture output \
+		env \
+		PATH="$mock_bin" \
+			MOCK_APT_LOG="$apt_log" \
+			MOCK_SUDO_LOG="$sudo_log" \
+			MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+			SITES_AVAILABLE_DIR="$sites_avail" \
+			SITES_ENABLED_DIR="$sites_enabled" \
+			bash -c "printf 'y\ny\n' | \"$repo_dir/nginx/install-nginx-and-deploy.sh\" --env-file \"$env_file\""; then
+		if check_contains "$output" "Installing nginx using apt..." \
+			&& grep -Fq 'install -y nginx' "$apt_log" \
+			&& [[ -x "$mock_bin/nginx" ]]; then
+			pass "nginx deploy prompts for and installs nginx when nginx is missing"
+		else
+			fail "nginx deploy did not prompt for nginx installation as expected"
+		fi
+	else
+		fail "nginx deploy failed when installing nginx through the prompt"
 	fi
 
 	rm -rf "$tmp_dir"
@@ -1112,10 +1201,10 @@ EOF
 		fail "nginx deploy did not create symlink in sandboxed sites-enabled dir"
 	fi
 
-	if grep -Fq 'install -y nginx gettext-base' "$apt_log"; then
-		pass "nginx deploy used mocked package installation path"
+	if [[ ! -s "$apt_log" ]]; then
+		pass "nginx deploy skips nginx installation when nginx already exists"
 	else
-		fail "nginx deploy did not run mocked package installation commands"
+		fail "nginx deploy should not install nginx when nginx is already available"
 	fi
 
 	if grep -Fq "$sites_avail/$conf_name.conf" "$sudo_log"; then
@@ -1192,6 +1281,53 @@ EOF
 		fi
 	else
 		fail "nginx restore --latest failed in sandboxed temp dirs"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
+functional_nginx_https_missing_certbot_suggests_snap() {
+	local output="" tmp_dir repo_dir mock_bin env_file
+	local apt_log sudo_log systemctl_log
+	local key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
+	mock_bin="$tmp_dir/mock-bin"
+	env_file="$repo_dir/.env"
+	apt_log="$tmp_dir/apt.log"
+	sudo_log="$tmp_dir/sudo.log"
+	systemctl_log="$tmp_dir/systemctl.log"
+
+	create_repo_copy "$repo_dir"
+	create_nginx_deploy_mock_bin "$mock_bin"
+
+	cat >"$env_file" <<EOF
+N8N_HOST=automation.test
+N8N_PROTOCOL=https
+WEBHOOK_URL=https://automation.test/
+N8N_ENCRYPTION_KEY=$key
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=admin_pass
+POSTGRES_DB=n8n
+POSTGRES_NON_ROOT_USER=n8n_user
+POSTGRES_NON_ROOT_PASSWORD=n8n_user_pass
+EOF
+
+	if run_and_capture output \
+		env \
+		PATH="$mock_bin" \
+			MOCK_APT_LOG="$apt_log" \
+			MOCK_SUDO_LOG="$sudo_log" \
+			MOCK_SYSTEMCTL_LOG="$systemctl_log" \
+			"$repo_dir/nginx/install-nginx-and-deploy.sh" --env-file "$env_file"; then
+		fail "nginx deploy should fail when HTTPS cert creation is needed and certbot is missing"
+	else
+		if check_contains "$output" "Install certbot with snap (recommended)"; then
+			pass "nginx deploy suggests snap installation when certbot is missing for HTTPS"
+		else
+			fail "nginx deploy did not suggest snap installation for missing certbot"
+		fi
 	fi
 
 	rm -rf "$tmp_dir"
@@ -1496,7 +1632,9 @@ check_functional() {
 	functional_symlink_repo_resolution
 	functional_uninstall_command
 	functional_nginx_generate
+	functional_nginx_deploy_missing_nginx_prompt
 	functional_nginx_deploy_sandboxed
+	functional_nginx_https_missing_certbot_suggests_snap
 	functional_interactive_exit
 	functional_interactive_nginx_defaults
 	functional_interactive_prompt_minimization

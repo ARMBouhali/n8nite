@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
 	cat <<'EOF'
-Install nginx (and certbot if needed), generate n8n config from env, review, and deploy.
+Install nginx if needed, then generate n8n config from env, review, and deploy.
 
 Usage:
   ./nginx/install-nginx-and-deploy.sh [options]
@@ -29,8 +29,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_CHECK_SCRIPT="$REPO_ROOT/check-env.sh"
 
+escape_sed_replacement() {
+	printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+render_template_file() {
+	local template_file="$1"
+	local output_file="$2"
+	shift 2
+	local sed_args=()
+	local key="" value="" escaped_value=""
+
+	while (($# > 0)); do
+		key="$1"
+		value="$2"
+		shift 2
+		escaped_value="$(escape_sed_replacement "$value")"
+		sed_args+=(-e "s|\${${key}}|${escaped_value}|g")
+	done
+
+	sed "${sed_args[@]}" "$template_file" >"$output_file"
+}
+
 log() {
 	printf '[INFO] %s\n' "$*"
+}
+
+confirm_yes_no() {
+	local label="$1"
+	local answer=""
+	read -r -p "$label [y/N]: " answer
+	[[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
 fail() {
@@ -72,26 +101,34 @@ load_env_file() {
 	set +a
 }
 
-install_dependencies() {
-	local protocol="$1"
+install_nginx_package() {
 	if command -v apt-get >/dev/null 2>&1; then
-		log "Installing nginx/gettext using apt..."
+		log "Installing nginx using apt..."
 		run_root apt-get update
-		run_root apt-get install -y nginx gettext-base
-		if [[ "$protocol" != "http" ]]; then
-			log "Installing certbot using apt..."
-			run_root apt-get install -y certbot python3-certbot-nginx
-		fi
+		run_root apt-get install -y nginx
 	elif command -v dnf >/dev/null 2>&1; then
-		log "Installing nginx/gettext using dnf..."
-		run_root dnf install -y nginx gettext
-		if [[ "$protocol" != "http" ]]; then
-			log "Installing certbot using dnf..."
-			run_root dnf install -y certbot python3-certbot-nginx
-		fi
+		log "Installing nginx using dnf..."
+		run_root dnf install -y nginx
 	else
-		fail "Unsupported package manager. Install nginx, certbot, and envsubst (gettext) manually."
+		fail "Unsupported package manager. Install nginx manually before deploying."
 	fi
+}
+
+ensure_nginx_available() {
+	if command -v nginx >/dev/null 2>&1; then
+		return 0
+	fi
+
+	if ! confirm_yes_no "nginx is not installed. Install it now?"; then
+		fail "nginx is required for deployment"
+	fi
+
+	install_nginx_package
+	command -v nginx >/dev/null 2>&1 || fail "nginx installation completed but nginx is still unavailable in PATH"
+}
+
+certbot_snap_install_hint() {
+	printf '%s' "Install certbot with snap (recommended): sudo snap install --classic certbot && sudo ln -sf /snap/bin/certbot /usr/bin/certbot"
 }
 
 render_config() {
@@ -103,25 +140,23 @@ render_config() {
 	local certbot_options="$6"
 	local certbot_dhparam="$7"
 	local out_file="$8"
-	local template_file variables
+	local template_file
 	if [[ "$mode" == "http" ]]; then
 		template_file="$SCRIPT_DIR/templates/n8n-http.conf.tmpl"
-		variables='${SERVER_NAME} ${UPSTREAM}'
 	else
 		template_file="$SCRIPT_DIR/templates/n8n-https.conf.tmpl"
-		variables='${SERVER_NAME} ${UPSTREAM} ${SSL_CERT} ${SSL_KEY} ${CERTBOT_SSL_OPTIONS} ${CERTBOT_DHPARAM}'
 	fi
 
 	[[ -f "$template_file" ]] || fail "Template not found: $template_file"
-	command -v envsubst >/dev/null 2>&1 || fail "envsubst not found. Install gettext/gettext-base."
-
-	SERVER_NAME="$domain" \
-	UPSTREAM="$upstream" \
-	SSL_CERT="$ssl_cert" \
-	SSL_KEY="$ssl_key" \
-	CERTBOT_SSL_OPTIONS="$certbot_options" \
-	CERTBOT_DHPARAM="$certbot_dhparam" \
-		envsubst "$variables" <"$template_file" >"$out_file"
+	render_template_file \
+		"$template_file" \
+		"$out_file" \
+		SERVER_NAME "$domain" \
+		UPSTREAM "$upstream" \
+		SSL_CERT "$ssl_cert" \
+		SSL_KEY "$ssl_key" \
+		CERTBOT_SSL_OPTIONS "$certbot_options" \
+		CERTBOT_DHPARAM "$certbot_dhparam"
 }
 
 ENV_FILE="$REPO_ROOT/.env"
@@ -184,13 +219,14 @@ MODE="$PROTOCOL"
 SSL_CERT=""
 SSL_KEY=""
 
-install_dependencies "$MODE"
+ensure_nginx_available
 
 if [[ "$MODE" == "https" ]]; then
 	SSL_CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 	SSL_KEY="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 
 	if [[ ! -f "$SSL_CERT" || ! -f "$SSL_KEY" ]]; then
+		command -v certbot >/dev/null 2>&1 || fail "certbot is required to create a new certificate for ${DOMAIN}. $(certbot_snap_install_hint)"
 		[[ -n "$CERTBOT_EMAIL" ]] || read -r -p "Certbot email for Let's Encrypt: " CERTBOT_EMAIL
 		[[ -n "$CERTBOT_EMAIL" ]] || fail "Email is required for certificate creation"
 
