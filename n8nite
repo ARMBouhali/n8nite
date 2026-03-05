@@ -693,28 +693,27 @@ print_interactive_menu() {
 	printf '%bEnv file:%b %s\n' "$section" "$reset" "$ENV_FILE"
 	printf '%b----------------------------------------%b\n' "$section" "$reset"
 	printf '%bEnvironment%b\n' "$section" "$reset"
-	printf '  1) Env check\n'
-	printf '  2) Env init (local)\n'
-	printf '  3) Env init (prod)\n'
-	printf '  4) Edit env file (.env)\n'
-	printf '  5) View env file (.env)\n'
+	printf '  1) Select .env file\n'
+	printf '  2) Check .env file\n'
+	printf '  3) Initialize .env file (local)\n'
+	printf '  4) Initialize .env file (production)\n'
+	printf '  5) Generate N8N key\n'
+	printf '  6) Edit .env file\n'
+	printf '  7) View .env file\n'
 	printf '%bStack%b\n' "$section" "$reset"
-	printf '  6) Stack up\n'
-	printf '  7) Stack down\n'
-	printf '  8) Stack restart\n'
-	printf '  9) Stack status (ps)\n'
-	printf '  10) Stack logs\n'
+	printf '  8) Stack up\n'
+	printf '  9) Stack down\n'
+	printf '  10) Stack restart\n'
+	printf '  11) Stack status (ps)\n'
+	printf '  12) Stack logs\n'
 	printf '%bNginx%b\n' "$section" "$reset"
-	printf '  11) Nginx generate\n'
-	printf '  12) Nginx deploy\n'
+	printf '  13) Nginx generate\n'
+	printf '  14) Nginx deploy\n'
 	printf '%bDiagnostics%b\n' "$section" "$reset"
-	printf '  13) Deps check\n'
-	printf '  14) Test suite (functional)\n'
-	printf '  15) Test suite (requirements)\n'
-	printf '  16) Doctor\n'
-	printf '%bUtility%b\n' "$section" "$reset"
-	printf '  17) Change env file\n'
-	printf '  18) Generate N8N key\n'
+	printf '  15) Deps check\n'
+	printf '  16) Test suite (functional)\n'
+	printf '  17) Test suite (requirements)\n'
+	printf '  18) Doctor\n'
 	printf '  0) Exit\n'
 }
 
@@ -730,60 +729,60 @@ interactive_menu() {
 
 		case "$choice" in
 			1)
-				run_step "env check" run_env_check || true
-				;;
-			2)
-				interactive_env_init "local"
-				;;
-			3)
-				interactive_env_init "prod"
-				;;
-			4)
-				interactive_edit_env_file
-				;;
-			5)
-				interactive_view_env_file
-				;;
-			6)
-				run_step "stack up" run_env_check && run_step "docker compose up -d" run_compose up -d || true
-				;;
-			7)
-				run_step "docker compose down" run_compose down || true
-				;;
-			8)
-				run_step "docker compose restart" run_compose restart || true
-				;;
-			9)
-				run_step "docker compose ps" run_compose ps || true
-				;;
-			10)
-				interactive_logs
-				;;
-			11)
-				interactive_nginx_generate
-				;;
-			12)
-				interactive_nginx_deploy
-				;;
-			13)
-				run_step "deps check" run_deps_check || true
-				;;
-			14)
-				run_step "test suite (functional)" "$TEST_SUITE_SCRIPT" -f || true
-				;;
-			15)
-				run_step "test suite (requirements)" "$TEST_SUITE_SCRIPT" -r || true
-				;;
-			16)
-				run_step "doctor" run_env_check && run_step "docker compose ps" run_compose ps || true
-				;;
-			17)
 				new_env="$(prompt_default "New env file path" "$ENV_FILE")"
 				ENV_FILE="$new_env"
 				log "Env file updated to: $ENV_FILE"
 				;;
-			18)
+			2)
+				run_step "env check" run_env_check || true
+				;;
+			3)
+				interactive_env_init "local"
+				;;
+			4)
+				interactive_env_init "prod"
+				;;
+			5)
 				interactive_keygen
+				;;
+			6)
+				interactive_edit_env_file
+				;;
+			7)
+				interactive_view_env_file
+				;;
+			8)
+				run_step "stack up" run_env_check && run_step "docker compose up -d" run_compose up -d || true
+				;;
+			9)
+				run_step "docker compose down" run_compose down || true
+				;;
+			10)
+				run_step "docker compose restart" run_compose restart || true
+				;;
+			11)
+				run_step "docker compose ps" run_compose ps || true
+				;;
+			12)
+				interactive_logs
+				;;
+			13)
+				interactive_nginx_generate
+				;;
+			14)
+				interactive_nginx_deploy
+				;;
+			15)
+				run_step "deps check" run_deps_check || true
+				;;
+			16)
+				run_step "test suite (functional)" "$TEST_SUITE_SCRIPT" -f || true
+				;;
+			17)
+				run_step "test suite (requirements)" "$TEST_SUITE_SCRIPT" -r || true
+				;;
+			18)
+				run_step "doctor" run_env_check && run_step "docker compose ps" run_compose ps || true
 				;;
 			0)
 				log "Exiting interactive mode."
