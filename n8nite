@@ -54,7 +54,22 @@ Examples:
 EOF
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+resolve_script_dir() {
+	local source="${BASH_SOURCE[0]}"
+	local dir=""
+
+	if command -v readlink >/dev/null 2>&1; then
+		while [[ -L "$source" ]]; do
+			dir="$(cd -P "$(dirname "$source")" && pwd)"
+			source="$(readlink "$source")"
+			[[ "$source" != /* ]] && source="$dir/$source"
+		done
+	fi
+
+	cd -P "$(dirname "$source")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
 REPO_ROOT="$SCRIPT_DIR"
 COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
 ENV_FILE="$REPO_ROOT/.env"

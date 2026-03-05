@@ -699,6 +699,32 @@ functional_install_script() {
 	rm -rf "$tmp_dir"
 }
 
+functional_symlink_repo_resolution() {
+	local tmp_dir repo_dir bin_dir env_file output
+	tmp_dir="$(mktemp -d)"
+	repo_dir="$tmp_dir/repo"
+	bin_dir="$tmp_dir/bin"
+	env_file="$tmp_dir/local.env"
+
+	mkdir -p "$repo_dir" "$bin_dir"
+	cp "$N8N_SCRIPT" "$repo_dir/n8nite"
+	cp "$ENV_LOCAL_TEMPLATE" "$repo_dir/.env.local.example"
+	chmod +x "$repo_dir/n8nite"
+	ln -s "$repo_dir/n8nite" "$bin_dir/n8nite"
+
+	if run_and_capture output "$bin_dir/n8nite" --env-file "$env_file" env init local; then
+		if [[ -f "$env_file" ]]; then
+			pass "n8nite resolves repo root correctly when invoked via symlink"
+		else
+			fail "n8nite symlink invocation succeeded but target env file was not created"
+		fi
+	else
+		fail "n8nite failed to resolve repo root when invoked via symlink"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
 functional_uninstall_command() {
 	local tmp_dir install_dir bin_dir output
 	tmp_dir="$(mktemp -d)"
@@ -985,6 +1011,7 @@ check_functional() {
 	functional_env_keygen
 	functional_deps_command
 	functional_install_script
+	functional_symlink_repo_resolution
 	functional_uninstall_command
 	functional_nginx_generate
 	functional_nginx_deploy_sandboxed
