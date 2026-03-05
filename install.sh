@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_URL="${N8N_SH_REPO:-https://github.com/ARMBouhali/n8nite.git}"
 REPO_REF="${N8N_SH_REF:-main}"
-INSTALL_DIR="${N8N_SH_DIR:-$HOME/.n8n-sh}"
+INSTALL_DIR="${N8N_SH_DIR:-$HOME/.local/share/n8nite}"
 BIN_DIR="${N8N_SH_BIN_DIR:-$HOME/.local/bin}"
 BIN_NAME="${N8N_SH_BIN_NAME:-n8nite}"
 PERSIST_RC="${N8N_SH_PERSIST_RC:-1}"
@@ -19,7 +19,7 @@ Usage:
 Environment overrides:
   N8N_SH_REPO      Git repository URL
   N8N_SH_REF       Branch or tag (default: main)
-  N8N_SH_DIR       Install directory (default: ~/.n8n-sh)
+  N8N_SH_DIR       Install directory (default: ~/.local/share/n8nite)
   N8N_SH_BIN_DIR   Symlink directory (default: ~/.local/bin)
   N8N_SH_BIN_NAME  Installed command name (default: n8nite)
   N8N_SH_PERSIST_RC  Write PATH export to ~/.bashrc and ~/.zshrc (default: 1)
@@ -40,6 +40,10 @@ need_cmd() {
 }
 
 install_repo() {
+	local install_parent
+	install_parent="$(dirname "$INSTALL_DIR")"
+	mkdir -p "$install_parent"
+
 	if [[ -d "$INSTALL_DIR/.git" ]]; then
 		log "Updating existing installation in $INSTALL_DIR"
 		git -C "$INSTALL_DIR" fetch --tags origin "$REPO_REF"
@@ -153,6 +157,7 @@ main() {
 	need_cmd bash
 	need_cmd ln
 	need_cmd mkdir
+	need_cmd dirname
 	need_cmd awk
 	need_cmd mktemp
 	need_cmd mv

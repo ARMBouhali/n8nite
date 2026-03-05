@@ -144,7 +144,7 @@ curl -fsSL https://raw.githubusercontent.com/ARMBouhali/n8nite/main/install.sh |
 
 Default install locations:
 
-- 📁 repo: `~/.n8n-sh`
+- 📁 repo: `~/.local/share/n8nite`
 - 🔗 command symlink: `~/.local/bin/n8nite`
 - 🧷 PATH persistence: writes managed PATH blocks to `~/.bashrc` and `~/.zshrc`
 
@@ -237,6 +237,7 @@ Common commands:
 ./n8nite down -v
 ./n8nite restart n8n
 ./n8nite doctor
+./n8nite uninstall --yes
 ```
 
 Interactive mode:

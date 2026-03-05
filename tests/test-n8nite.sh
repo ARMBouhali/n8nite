@@ -327,7 +327,8 @@ functional_help_and_errors() {
 
 	if run_and_capture output "$N8N_SCRIPT" --help \
 		&& check_contains "$output" "n8nite :: opinionated n8n stack on wheels" \
-		&& check_contains "$output" "Unified entrypoint for this n8n stack."; then
+		&& check_contains "$output" "Unified entrypoint for this n8n stack." \
+		&& check_contains "$output" "uninstall [args...]"; then
 		pass "n8nite --help prints banner and usage"
 	else
 		fail "n8nite --help failed or banner/usage text changed"
@@ -628,6 +629,12 @@ functional_install_script() {
 		fail "install.sh help is missing N8N_SH_PERSIST_RC"
 	fi
 
+	if run_and_capture output "$INSTALL_SCRIPT" --help && check_contains "$output" "~/.local/share/n8nite"; then
+		pass "install.sh help documents default clone path"
+	else
+		fail "install.sh help is missing default clone path text"
+	fi
+
 	tmp_dir="$(mktemp -d)"
 	mock_bin="$tmp_dir/mock-bin"
 	home_dir="$tmp_dir/home"
@@ -687,6 +694,39 @@ functional_install_script() {
 		fi
 	else
 		fail "install.sh rerun failed in isolated HOME"
+	fi
+
+	rm -rf "$tmp_dir"
+}
+
+functional_uninstall_command() {
+	local tmp_dir install_dir bin_dir output
+	tmp_dir="$(mktemp -d)"
+	install_dir="$tmp_dir/install"
+	bin_dir="$tmp_dir/bin"
+	mkdir -p "$install_dir" "$bin_dir"
+
+	cp "$N8N_SCRIPT" "$install_dir/n8nite"
+	chmod +x "$install_dir/n8nite"
+	ln -s "$install_dir/n8nite" "$bin_dir/n8nite"
+
+	if run_and_capture output env N8N_SH_BIN_DIR="$bin_dir" "$bin_dir/n8nite" uninstall --yes; then
+		if [[ ! -e "$bin_dir/n8nite" && ! -L "$bin_dir/n8nite" ]]; then
+			pass "n8nite uninstall removes installed symlink"
+		else
+			fail "n8nite uninstall did not remove installed symlink"
+		fi
+	else
+		fail "n8nite uninstall failed in installed-symlink scenario"
+		rm -rf "$tmp_dir"
+		return
+	fi
+
+	if run_and_capture output env N8N_SH_BIN_DIR="$bin_dir" "$install_dir/n8nite" uninstall --yes \
+		&& check_contains "$output" "No installed command symlink"; then
+		pass "n8nite uninstall is idempotent when symlink is already absent"
+	else
+		fail "n8nite uninstall idempotency check failed"
 	fi
 
 	rm -rf "$tmp_dir"
@@ -945,6 +985,7 @@ check_functional() {
 	functional_env_keygen
 	functional_deps_command
 	functional_install_script
+	functional_uninstall_command
 	functional_nginx_generate
 	functional_nginx_deploy_sandboxed
 	functional_interactive_exit

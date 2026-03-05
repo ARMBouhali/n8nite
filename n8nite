@@ -18,6 +18,7 @@ Commands:
   env check [args...]                 Validate env file (wraps check-env.sh)
   env init [local|prod] [--force]     Create env file from template
   env keygen [--write] [--force]      Generate secure N8N_ENCRYPTION_KEY
+  uninstall [args...]                 Remove installed n8nite command symlink
 
   up [compose args...]                Validate env, then docker compose up -d
   down [compose args...]              docker compose down
@@ -46,6 +47,7 @@ Examples:
   ./n8nite up
   ./n8nite logs n8n
   ./n8nite interactive
+  ./n8nite uninstall --yes
   ./n8nite nginx generate -m https -s automation.example.com
   ./n8nite nginx deploy -c n8n-automation -m admin@example.com
   ./n8nite test -f
@@ -329,6 +331,64 @@ cmd_nginx() {
 			fail "Unknown nginx subcommand: ${subcommand:-<empty>} (use: generate|deploy)"
 			;;
 	esac
+}
+
+cmd_uninstall() {
+	local bin_dir="${N8N_SH_BIN_DIR:-$HOME/.local/bin}"
+	local bin_name="${N8N_SH_BIN_NAME:-n8nite}"
+	local target=""
+	local assume_yes=0
+
+	while (($# > 0)); do
+		case "$1" in
+			--bin-dir)
+				bin_dir="${2:-}"
+				shift 2
+				;;
+			--bin-name)
+				bin_name="${2:-}"
+				shift 2
+				;;
+			-y|--yes)
+				assume_yes=1
+				shift
+				;;
+			-h|--help)
+				cat <<'EOF'
+Usage:
+  ./n8nite uninstall [--yes] [--bin-dir PATH] [--bin-name NAME]
+
+Options:
+  -y, --yes          Skip confirmation prompt
+      --bin-dir      Symlink directory (default: ~/.local/bin or N8N_SH_BIN_DIR)
+      --bin-name     Command name (default: n8nite or N8N_SH_BIN_NAME)
+EOF
+				return 0
+				;;
+			*)
+				fail "Unknown uninstall argument: $1"
+				;;
+		esac
+	done
+
+	target="$bin_dir/$bin_name"
+
+	if [[ ! -e "$target" && ! -L "$target" ]]; then
+		log "No installed command symlink at $target"
+		return 0
+	fi
+
+	[[ -L "$target" ]] || fail "Refusing to remove non-symlink path: $target"
+
+	if [[ "$assume_yes" -ne 1 ]]; then
+		if ! confirm_yes_no "Remove installed symlink $target?"; then
+			log "Aborted"
+			return 0
+		fi
+	fi
+
+	rm -f "$target"
+	log "Removed symlink: $target"
 }
 
 prompt_default() {
@@ -625,6 +685,9 @@ case "$command" in
 		;;
 	nginx)
 		cmd_nginx "$@"
+		;;
+	uninstall)
+		cmd_uninstall "$@"
 		;;
 	interactive|i)
 		interactive_menu
